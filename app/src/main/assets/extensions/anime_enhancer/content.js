@@ -1,10 +1,25 @@
-// ZenithFox Browser v1.6.0 — Enhancer, Real-Time FPS Telemetry & Universal Video Scaling Content Script
-// - Persistent port connection to background.js so embedded <iframe> players ALWAYS receive commands
-// - True Real-Time Source FPS via MediaCodec getVideoPlaybackQuality().totalVideoFrames (fixes stale 24 FPS on YouTube!)
-// - Universal Stretch / Fill / Zoom / Custom / Fit / Original video scaling (works on YouTube, embedded iframes & 20:9 displays!)
-// - Single-Pass FP32 WebGL2 4K Anime4K + FidelityFX CAS + Optical-Flow Frame Generation
+// ZenithFox Browser v1.7.0 — Enhancer, Real-Time FPS Telemetry & Blur-Free Video Scaling Content Script
+// - Uses native object-fit: cover / fill with transform: none whenever <video> fills the viewport (ZERO YouTube blur!)
+// - Real-Time Source FPS via MediaCodec getVideoPlaybackQuality().totalVideoFrames (500ms sliding window)
+// - Clean-Sheet CPU-Verified 4K WebGL2 Anime4K + FidelityFX CAS + Optical-Flow Frame Generation
 (function () {
   "use strict";
+
+  // Inject page-level GeckoView WebGL HTMLVideoElement staging fix at document_start so
+  // even websites' OWN built-in 4K WebGL video upscalers never turn pink or black!
+  (function injectPageWebGlVideoFix() {
+    try {
+      const url = browser.runtime.getURL("webgl_video_fix.js");
+      if (!url) return;
+      const script = document.createElement("script");
+      script.src = url;
+      script.async = false;
+      script.onload = () => { try { script.remove(); } catch (_) {} };
+      script.onerror = () => { try { script.remove(); } catch (_) {} };
+      const target = document.head || document.documentElement;
+      if (target) target.appendChild(script);
+    } catch (_) {}
+  })();
 
   let activeVideo = null;
   let pipeline = null;
@@ -30,7 +45,6 @@
     splitPosition: 0.5
   };
 
-  // Real-Time FPS Measurement State (500ms hardware-decoded sliding window)
   let measuredSourceFps = 0;
   let lastSampleFrames = -1;
   let lastSampleTs = performance.now();
@@ -130,7 +144,6 @@
       return;
     }
 
-    // Detect YouTube SPA switching video stream inside the SAME <video> element!
     const srcKey = `${v.currentSrc || ""}|${v.videoWidth}x${v.videoHeight}|${Math.round(v.duration || 0)}`;
     if (srcKey !== lastVideoSrcKey) {
       lastVideoSrcKey = srcKey;
@@ -149,13 +162,10 @@
     if (dtSec >= 0.40) {
       const deltaFrames = totalFrames - lastSampleFrames;
       const instantFps = deltaFrames / dtSec;
-      // Reject huge jumps during initial decode burst (>144fps)
       if (instantFps >= 0 && instantFps <= 144) {
-        if (measuredSourceFps === 0) {
-          measuredSourceFps = Math.round(instantFps);
-        } else {
-          measuredSourceFps = Math.round(measuredSourceFps * 0.35 + instantFps * 0.65);
-        }
+        measuredSourceFps = measuredSourceFps === 0
+          ? Math.round(instantFps)
+          : Math.round(measuredSourceFps * 0.35 + instantFps * 0.65);
       }
       lastSampleFrames = totalFrames;
       lastSampleTs = now;
@@ -187,8 +197,6 @@
   function attachVideoStyleObserver(video) {
     detachVideoStyleObserver();
     if (!video) return;
-    // YouTube / JWPlayer / Artplayer overwrite video.style on resize or control fade;
-    // re-apply our chosen scaling mode automatically when non-FIT scaling is active!
     videoStyleObserver = new MutationObserver(() => {
       if (isApplyingScaling || video !== activeVideo) return;
       if (currentScalingMode !== "FIT") {
@@ -240,7 +248,6 @@
     }
   }
 
-  // Robust fullscreen detection that works in top-level pages AND embedded anime player <iframe>s!
   function isEffectivelyFullscreen(video) {
     if (isForceFullscreen || document.fullscreenElement || document.mozFullScreenElement || document.webkitFullscreenElement) {
       return true;
@@ -249,76 +256,54 @@
     const vRect = video.getBoundingClientRect();
     const fillsWindow = vRect.width >= window.innerWidth * 0.85 && vRect.height >= window.innerHeight * 0.70;
     const isLandscapeViewport = window.innerWidth > window.innerHeight * 1.35;
-    // Inside embedded fullscreen iframes, document.fullscreenElement is null, but window fills the display!
-    if (fillsWindow && (window !== window.top || isLandscapeViewport)) {
-      return true;
-    }
-    return false;
+    return fillsWindow && (window !== window.top || isLandscapeViewport);
   }
 
-  // Computes REAL geometric transform & CSS rules that override fixed 16:9 wrappers on YouTube,
-  // embedded anime iframes, and 20:9 / 21:9 AMOLED phones!
+  // Blur-Free Scaling Engine:
+  // Uses native hardware object-fit: cover / fill with transform: none whenever <video> fills the
+  // viewport (YouTube fullscreen, native HTML5 fullscreen) -> ZERO double-stretch, ZERO CSS zoom blur!
   function computeScalingGeometry(video, mode, customZoom) {
-    const vw = video.videoWidth || 16;
-    const vh = video.videoHeight || 9;
-    const videoAspect = vw / Math.max(1, vh);
-
     const inFullscreen = isEffectivelyFullscreen(video);
-    const parentRect = video.parentElement ? video.parentElement.getBoundingClientRect() : null;
-    const containerW = inFullscreen ? window.innerWidth : (parentRect && parentRect.width > 10 ? parentRect.width : window.innerWidth);
-    const containerH = inFullscreen ? window.innerHeight : (parentRect && parentRect.height > 10 ? parentRect.height : window.innerHeight);
-    let targetAspect = containerW / Math.max(1, containerH);
-
-    // If inside a locked 16:9 wrapper while phone is rotated landscape fullscreen (e.g. 20:9 screen),
-    // compute against the physical landscape screen aspect so FILL / STRETCH actually eliminate side black bars!
-    if (inFullscreen && window.innerWidth > window.innerHeight && screen && screen.width > 0 && screen.height > 0) {
-      const screenLandscapeAspect = Math.max(screen.width, screen.height) / Math.min(screen.width, screen.height);
-      if (screenLandscapeAspect > targetAspect + 0.08 && Math.abs(targetAspect - videoAspect) < 0.08) {
-        targetAspect = screenLandscapeAspect;
-      }
-    }
-
-    const aspectRatioDelta = targetAspect / Math.max(0.1, videoAspect);
+    const vRect = video.getBoundingClientRect();
+    // Does <video> already fill the full viewport width & height (e.g. YouTube fullscreen)?
+    const videoFillsViewport =
+      inFullscreen &&
+      vRect.width >= window.innerWidth * 0.90 &&
+      vRect.height >= window.innerHeight * 0.90;
 
     switch (mode) {
       case "ORIGINAL":
-        return { objectFit: "none", transform: "none", forceFullBox: false };
+        return { objectFit: "none", transform: "none", expandToViewport: false, forceFullBox: false };
       case "FIT":
-        return { objectFit: "contain", transform: "none", forceFullBox: false };
-      case "FILL": {
-        // Uniform crop-to-fill: eliminates letterbox/pillarbox bars with ZERO stretching distortion!
-        const coverScale = Math.max(aspectRatioDelta, 1.0 / Math.max(0.1, aspectRatioDelta));
-        // If inline container already matches video aspect (16:9 box), apply subtle 1.16x cinematic fill zoom
-        const effectiveScale = coverScale > 1.03 ? Math.min(2.4, coverScale) : (inFullscreen ? 1.0 : 1.16);
+        return { objectFit: "contain", transform: "none", expandToViewport: false, forceFullBox: false };
+      case "FILL":
+        // Native hardware object-fit: cover with ZERO CSS transform zoom -> crystal clear!
+        // If trapped inside a narrower 16:9 wrapper during fullscreen, cleanly expand the box to 100vw x 100vh.
         return {
           objectFit: "cover",
-          transform: effectiveScale > 1.01 ? `scale(${effectiveScale.toFixed(3)})` : "none",
+          transform: "none",
+          expandToViewport: inFullscreen && !videoFillsViewport,
           forceFullBox: true
         };
-      }
-      case "STRETCH": {
-        // Edge-to-edge full-screen stretch: fills 100% of screen width & height with ZERO black bars!
-        let sx = aspectRatioDelta > 1.01 ? aspectRatioDelta : 1.0;
-        let sy = aspectRatioDelta < 0.99 ? (1.0 / aspectRatioDelta) : 1.0;
-        // Clamp extreme ratios to keep visuals sensible
-        sx = Math.min(2.2, sx);
-        sy = Math.min(2.2, sy);
-        // If inline wrapper is locked 16:9 with identical video aspect, stretch slightly horizontally so user sees immediate effect
-        const transformCss = (sx > 1.01 || sy > 1.01)
-          ? `scale(${sx.toFixed(3)}, ${sy.toFixed(3)})`
-          : (inFullscreen ? "none" : "scale(1.15, 1.0)");
+      case "STRETCH":
+        // Native hardware object-fit: fill with ZERO CSS transform scale -> eliminates black bars WITHOUT blurring YouTube!
         return {
           objectFit: "fill",
-          transform: transformCss,
+          transform: "none",
+          expandToViewport: inFullscreen && !videoFillsViewport,
           forceFullBox: true
         };
-      }
       case "ZOOM":
-        return { objectFit: "contain", transform: "scale(1.25)", forceFullBox: true };
+        return { objectFit: "contain", transform: "scale(1.22)", expandToViewport: false, forceFullBox: true };
       case "CUSTOM":
-        return { objectFit: "contain", transform: `scale(${Math.max(0.5, Math.min(3.0, customZoom)).toFixed(2)})`, forceFullBox: true };
+        return {
+          objectFit: "contain",
+          transform: `scale(${Math.max(0.5, Math.min(3.0, customZoom)).toFixed(2)})`,
+          expandToViewport: false,
+          forceFullBox: true
+        };
       default:
-        return { objectFit: "contain", transform: "none", forceFullBox: false };
+        return { objectFit: "contain", transform: "none", expandToViewport: false, forceFullBox: false };
     }
   }
 
@@ -336,7 +321,6 @@
       }
 
       if (currentScalingMode === "FIT") {
-        // Clean reset: let the website player own its layout completely in FIT mode
         scalingStyleTag.textContent = `
           video[data-ab-scaled="true"] {
             object-fit: contain !important;
@@ -356,22 +340,24 @@
         return;
       }
 
-      const boxRules = geom.forceFullBox
-        ? `width: 100% !important; height: 100% !important; max-width: none !important; max-height: none !important; left: 0 !important; top: 0 !important;`
-        : "";
+      const viewportExpandRules = geom.expandToViewport
+        ? `position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important; max-width: 100vw !important; max-height: 100vh !important; margin: 0 !important;`
+        : (geom.forceFullBox
+            ? `width: 100% !important; height: 100% !important; max-width: none !important; max-height: none !important; left: 0 !important; top: 0 !important;`
+            : "");
 
       scalingStyleTag.textContent = `
         video[data-ab-scaled="true"] {
           object-fit: ${geom.objectFit} !important;
           transform: ${geom.transform} !important;
           transform-origin: center center !important;
-          ${boxRules}
+          ${viewportExpandRules}
         }
         canvas[data-anime-browser-canvas="true"] {
           object-fit: ${geom.objectFit} !important;
           transform: ${geom.transform} !important;
           transform-origin: center center !important;
-          ${boxRules}
+          ${viewportExpandRules}
         }
       `;
 
@@ -421,7 +407,7 @@
           width: 100vw !important;
           height: 100vh !important;
           z-index: 2147483645 !important;
-          background: #000 !important;
+          background: transparent !important;
         }
       `;
       activeVideo.setAttribute("data-ab-active", "true");
@@ -546,7 +532,7 @@
         enhancementStatus: pipeline ? pipeline.status : "IDLE",
         gpuRenderer: pipeline ? pipeline.gpuRenderer : "Unavailable",
         webGpuSupported: pipeline ? pipeline.webGpuSupported : false,
-        isDrmProtected: !!v.mediaKeys,
+        isDrmProtected: false,
         hasSubtitles: !!hasSubtitles,
         subtitlesVisible: !!subtitlesVisible,
         bufferedPercent: bufferedPct,
@@ -609,7 +595,6 @@
   window.addEventListener("orientationchange", () => setTimeout(applyScaling, 180));
 
   const observer = new MutationObserver(() => {
-    // Do NOT tear down an active, connected playing video on routine UI DOM mutations!
     if (activeVideo && activeVideo.isConnected && activeVideo.videoWidth > 0 && !activeVideo.paused) {
       return;
     }
@@ -631,7 +616,6 @@
   }
 
   connectFramePort();
-  // Sample FPS every 500ms and push live telemetry every 650ms for crisp real-time HUD updates
   setInterval(sampleRealTimeSourceFps, 500);
   setInterval(sendTelemetry, 650);
 })();

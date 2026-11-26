@@ -49,9 +49,9 @@ enum class VideoScalingMode(val label: String, val description: String) {
 enum class EnhancementPreset(val label: String, val description: String) {
   OFF("Off", "Native hardware video decode only (zero shader overhead)"),
   PERFORMANCE("1080p Crisp", "Fast FidelityFX CAS sharpening & clean ink-line reconstruction (1.0x)"),
-  BALANCED("1440p Anime4K", "2-Pass Anime4K line thinning + Catmull-Rom upscale + CAS crispness (1.25x)"),
+  BALANCED("1440p Anime4K", "Catmull-Rom super-res + Anime4K line thinning + CAS crispness (1.25x)"),
   HIGH_QUALITY("2.5K Ultra Crisp", "Deep Anime4K ink darkening + strong FidelityFX CAS + HDR cel pop (1.5x)"),
-  ULTRA_QUALITY("4K Super-Res", "Maximum 2-Pass 4K Anime4K + Dual-Scale FidelityFX CAS up to 3840×2160 (2.0x)"),
+  ULTRA_QUALITY("4K Super-Res", "Maximum FP32 4K Anime4K + Dual-Scale FidelityFX CAS up to 3840×2160 (2.0x)"),
   CUSTOM("Custom", "User-tuned 4K shader parameters")
 }
 
@@ -158,11 +158,10 @@ data class VideoTelemetry(
 
   val statusHumanLabel: String
     get() = when (enhancementStatus) {
-      "ACTIVE_WEBGL2" -> if (frameGenActive) "WebGL2 Anime4K + Optical-Flow Active" else "WebGL2 Anime4K Shader Active"
-      "ACTIVE_WEBGL1" -> "WebGL1 Fallback Active"
-      "ACTIVE_CSS_GPU_FILTER" -> "WebRender GPU Color & Clarity (Safe Mode)"
-      "ACTIVE_SVG_GPU_FILTER" -> "WebRender GPU Sharpen (Cross-Origin)"
-      "CORS_OR_DRM_PROTECTED" -> "CSS Scaling Only (CORS/DRM Protected)"
+      "ACTIVE_WEBGL2" -> if (frameGenActive) "4K WebGL2 + Optical-Flow Active" else "4K WebGL2 Shader Active"
+      "ACTIVE_WEBGL1" -> "WebGL1 4K Fallback Active"
+      "ACTIVE_CSS_GPU_FILTER" -> "GPU Clarity & Color Boost Active"
+      "ACTIVE_SVG_GPU_FILTER" -> "GPU Clarity Active"
       "UNSUPPORTED" -> "GPU Shader Unavailable"
       else -> "Native Hardware Decode"
     }
@@ -283,5 +282,9 @@ data class BrowserSettings(
   val adBlockEnabled: Boolean = true,
   val popupBlockEnabled: Boolean = true,
   val trackerBlockEnabled: Boolean = true,
-  val downloadSubfolder: String = "ZenithFox"
+  val downloadSubfolder: String = "ZenithFox",
+  val autoPipOnMinimize: Boolean = true,
+  val autoCheckUpdates: Boolean = true,
+  val updateRepoSlug: String = "",
+  val skippedUpdateVersion: String = ""
 )

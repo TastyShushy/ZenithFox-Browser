@@ -30,16 +30,24 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Brightness6
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.ScreenRotation
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
@@ -68,6 +76,7 @@ import com.example.data.model.EnhancementConfig
 import com.example.data.model.VideoScalingMode
 import com.example.data.model.VideoTelemetry
 import kotlinx.coroutines.delay
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 @Composable
@@ -94,8 +103,10 @@ fun FloatingVideoControlButton(
 }
 
 /**
- * In-window Video Tools Sheet (Enhancement, Scaling, Download, PiP, Force Fullscreen, Brightness, Volume).
- * Does NOT replace or block the website's own native HTML5 video player controls!
+ * In-window Video Tools Sheet:
+ * Essential player controls (Play/Pause, -10s/+10s, +85s Anime OP Skip, Speed, Mute, Subtitles),
+ * 4K Upscaling & Frame Gen, Video Downloader, Screen Scaling, Brightness, Volume, PiP & Force Fullscreen.
+ * Does NOT replace or block the website's own native HTML5 video player!
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -111,7 +122,12 @@ fun FloatingVideoControlPanel(
   onSelectScalingMode: (VideoScalingMode, Float) -> Unit,
   onOpenEnhancer: () -> Unit,
   onOpenDownloader: () -> Unit,
-  onEnterPip: () -> Unit
+  onEnterPip: () -> Unit,
+  onTogglePlayPause: () -> Unit,
+  onSeekBy: (Double) -> Unit,
+  onSetSpeed: (Float) -> Unit,
+  onToggleMute: () -> Unit,
+  onToggleSubtitles: () -> Unit
 ) {
   BackHandler(onBack = onDismiss)
 
@@ -155,7 +171,7 @@ fun FloatingVideoControlPanel(
       Column(
         modifier = Modifier
           .fillMaxWidth()
-          .heightIn(max = 560.dp)
+          .heightIn(max = 600.dp)
           .verticalScroll(rememberScrollState())
           .navigationBarsPadding()
           .padding(horizontal = 20.dp, vertical = 12.dp),
@@ -176,7 +192,7 @@ fun FloatingVideoControlPanel(
           verticalAlignment = Alignment.CenterVertically
         ) {
           Column(modifier = Modifier.weight(1f)) {
-            Text("Video Enhancement & Display", style = MaterialTheme.typography.titleMedium)
+            Text("Video Player & 4K Tools", style = MaterialTheme.typography.titleMedium)
             val panelFpsText = when {
               !telemetry.isPlaying -> "Paused"
               telemetry.frameGenActive && telemetry.sourceFps > 0 && telemetry.outputFps > telemetry.sourceFps ->
@@ -192,7 +208,7 @@ fun FloatingVideoControlPanel(
             )
           }
           Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onEnterPip, modifier = Modifier.testTag("video_pip_button")) {
+            IconButton(onClick = { onDismiss(); onEnterPip() }, modifier = Modifier.testTag("video_pip_button")) {
               Icon(Icons.Filled.PictureInPictureAlt, contentDescription = "Picture in Picture")
             }
             IconButton(
@@ -211,6 +227,68 @@ fun FloatingVideoControlPanel(
           }
         }
 
+        // Essential Player Quick Controls: -10s, Play/Pause, +10s, +85s Anime OP Skip, Mute, Subtitles
+        Surface(
+          shape = RoundedCornerShape(16.dp),
+          color = MaterialTheme.colorScheme.surfaceContainerHigh,
+          contentColor = MaterialTheme.colorScheme.onSurface,
+          modifier = Modifier.fillMaxWidth()
+        ) {
+          Row(
+            modifier = Modifier
+              .fillMaxWidth()
+              .padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            IconButton(onClick = { onSeekBy(-10.0) }, modifier = Modifier.testTag("video_seek_back_10")) {
+              Icon(Icons.Filled.Replay10, contentDescription = "Rewind 10 seconds")
+            }
+            IconButton(onClick = onTogglePlayPause, modifier = Modifier.testTag("video_play_pause")) {
+              Icon(
+                imageVector = if (telemetry.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                contentDescription = if (telemetry.isPlaying) "Pause" else "Play",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(28.dp)
+              )
+            }
+            IconButton(onClick = { onSeekBy(10.0) }, modifier = Modifier.testTag("video_seek_fwd_10")) {
+              Icon(Icons.Filled.Forward10, contentDescription = "Forward 10 seconds")
+            }
+            Surface(
+              onClick = { onSeekBy(85.0) },
+              shape = RoundedCornerShape(10.dp),
+              color = MaterialTheme.colorScheme.primaryContainer,
+              contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+              modifier = Modifier.testTag("video_skip_intro_85")
+            ) {
+              Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+              ) {
+                Icon(Icons.Filled.FastForward, contentDescription = "Skip 85s Intro", modifier = Modifier.size(16.dp))
+                Text("+85s OP", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+              }
+            }
+            IconButton(onClick = onToggleMute, modifier = Modifier.testTag("video_mute_toggle")) {
+              Icon(
+                imageVector = if (telemetry.muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                contentDescription = if (telemetry.muted) "Unmute" else "Mute"
+              )
+            }
+            if (telemetry.hasSubtitles) {
+              IconButton(onClick = onToggleSubtitles, modifier = Modifier.testTag("video_subtitles_toggle")) {
+                Icon(
+                  imageVector = Icons.Filled.ClosedCaption,
+                  contentDescription = "Toggle subtitles",
+                  tint = if (telemetry.subtitlesVisible) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+              }
+            }
+          }
+        }
+
         // Quick Action Chips: 4K Enhancer & Video Downloader
         Row(
           modifier = Modifier.fillMaxWidth(),
@@ -220,6 +298,7 @@ fun FloatingVideoControlPanel(
             onClick = { onDismiss(); onOpenEnhancer() },
             shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
             modifier = Modifier.weight(1f)
           ) {
             Row(
@@ -236,6 +315,7 @@ fun FloatingVideoControlPanel(
             onClick = { onDismiss(); onOpenDownloader() },
             shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
             modifier = Modifier
               .weight(1f)
               .testTag("video_download_button")
@@ -251,6 +331,24 @@ fun FloatingVideoControlPanel(
                 text = if (detectedStreamCount > 0) "Download ($detectedStreamCount)" else "Download Video",
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSecondaryContainer
+              )
+            }
+          }
+        }
+
+        // Playback Speed Selector
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Icon(Icons.Filled.Speed, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+            Text("Playback Speed", style = MaterialTheme.typography.titleMedium)
+          }
+          FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f).forEach { spd ->
+              val selected = abs(telemetry.playbackRate - spd) < 0.05f
+              FilterChip(
+                selected = selected,
+                onClick = { onSetSpeed(spd) },
+                label = { Text(if (spd == 1.0f) "1×" else "${spd}×") }
               )
             }
           }
@@ -326,7 +424,6 @@ fun FloatingVideoControlPanel(
 
 /**
  * Non-blocking Fullscreen Floating Corner Pill!
- * CRITICAL: Does NOT cover the screen with a touch-intercepting overlay!
  * 99% of the fullscreen display passes ALL taps, play/pause, timeline scrubbing, subtitle,
  * episode, and quality clicks directly to the website's own native HTML5 video player.
  */
@@ -341,6 +438,7 @@ fun FullscreenToolsCornerPill(
   onOpenEnhancer: () -> Unit,
   onOpenDownloader: () -> Unit,
   onOpenControlPanel: () -> Unit,
+  onSkipIntro85: () -> Unit,
   onToggleOrientation: () -> Unit,
   onEnterPip: () -> Unit,
   onExitFullscreen: () -> Unit,
@@ -348,7 +446,6 @@ fun FullscreenToolsCornerPill(
 ) {
   var expanded by remember { mutableStateOf(false) }
 
-  // Auto-collapse after 6 seconds of inactivity so it stays super tiny & unobtrusive
   LaunchedEffect(expanded) {
     if (expanded) {
       delay(6000L)
@@ -363,11 +460,11 @@ fun FullscreenToolsCornerPill(
       .statusBarsPadding()
       .padding(top = 10.dp, end = 12.dp)
   ) {
-    // Compact Corner Toggle Pill (only occupies its own tiny pill bounds — NEVER blocks video clicks!)
     Surface(
       onClick = { expanded = !expanded },
       shape = RoundedCornerShape(20.dp),
       color = Color.Black.copy(alpha = if (expanded) 0.85f else 0.42f),
+      contentColor = Color.White,
       border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = if (expanded) 0.8f else 0.45f)),
       modifier = Modifier
         .alpha(if (expanded) 1f else 0.72f)
@@ -403,11 +500,11 @@ fun FullscreenToolsCornerPill(
       }
     }
 
-    // Expanded Floating Mini-Toolbar (still tiny & corner-anchored so the web video player remains clickable!)
     AnimatedVisibility(visible = expanded) {
       Surface(
         shape = RoundedCornerShape(18.dp),
-        color = Color.Black.copy(alpha = 0.86f),
+        color = Color.Black.copy(alpha = 0.88f),
+        contentColor = Color.White,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f))
       ) {
         Row(
@@ -425,11 +522,25 @@ fun FullscreenToolsCornerPill(
               onSetScalingMode(next, customZoom)
             },
             shape = RoundedCornerShape(10.dp),
-            color = Color.White.copy(alpha = 0.14f)
+            color = Color.White.copy(alpha = 0.14f),
+            contentColor = Color.White
           ) {
             Text(
               text = scalingMode.label,
               style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+              color = Color.White,
+              modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+            )
+          }
+          Surface(
+            onClick = { onSkipIntro85() },
+            shape = RoundedCornerShape(10.dp),
+            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.28f),
+            contentColor = Color.White
+          ) {
+            Text(
+              text = "+85s",
+              style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
               color = Color.White,
               modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
             )
@@ -442,7 +553,7 @@ fun FullscreenToolsCornerPill(
             )
           }
           IconButton(onClick = { expanded = false; onOpenControlPanel() }) {
-            Icon(Icons.Filled.Tune, contentDescription = "Display & Audio Tools", tint = Color.White)
+            Icon(Icons.Filled.Tune, contentDescription = "Player & Audio Tools", tint = Color.White)
           }
           IconButton(onClick = { onToggleOrientation() }) {
             Icon(Icons.Filled.ScreenRotation, contentDescription = "Rotate screen", tint = Color.White)

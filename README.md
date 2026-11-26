@@ -8,7 +8,7 @@
   </p>
 
   <p>
-    <img src="https://img.shields.io/badge/Version-1.6.0-A855F7?style=for-the-badge" alt="Version 1.6.0" />
+    <img src="https://img.shields.io/badge/Version-1.7.0-A855F7?style=for-the-badge" alt="Version 1.7.0" />
     <img src="https://img.shields.io/badge/Android-7.0%2B%20(arm64--v8a)-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android 7.0+ arm64-v8a" />
     <img src="https://img.shields.io/badge/Engine-Mozilla%20GeckoView%20140-FF7139?style=for-the-badge&logo=firefox&logoColor=white" alt="Mozilla GeckoView" />
     <img src="https://img.shields.io/badge/UI-Jetpack%20Compose%20M3-EC4899?style=for-the-badge&logo=jetpackcompose&logoColor=white" alt="Jetpack Compose Material 3" />
@@ -19,22 +19,21 @@
 
 ## ✨ Key Features
 
-### 🎬 Real-Time 4K Video Enhancement & GPU Frame Generation
-- **High-Precision (FP32) WebGL2 Anime4K + AMD FidelityFX CAS**: Sharpens blurry 720p/1080p streams up to crisp 4K with directional ink-line thinning, edge-preserving bilateral compression denoise, sky anti-banding, and luma-preserving HDR cel color pop.
-- **GPU Optical-Flow Frame Generation (MCFI)**: Smooth bidirectional Lucas-Kanade motion interpolation with selectable **30 / 45 / 60 / 90 / 120 FPS** targets, automatic scene-cut ghosting protection, and adaptive GPU thermal/frame-time safeguards.
+### 🎬 Rebuilt Zero-Black-Screen 4K Video Upscaling & GPU Frame Generation
+- **CPU-Verified Software Staging → FP32 WebGL2 4K Engine**: Completely bypasses Android GeckoView's Mali/SurfaceTexture black & pink screen bug by verifying live video pixels before uploading to high-precision WebGL2 Catmull-Rom + Anime4K line-thinning + AMD FidelityFX CAS shaders.
+- **Dynamic GPU Optical-Flow Frame Generation (MCFI)**: Automatically measures your video's real decoded cadence (24 / 30 / 60 FPS) and smoothly interpolates up to **30 / 45 / 60 / 90 / 120 FPS** with scene-cut ghosting protection and automatic thermal throttling safeguards.
 - **Live Before / After Split Compare**: Toggle an interactive split-screen divider to compare raw video against the 4K-enhanced output in real time.
-- **Zero-Glitch Automatic Safeguards**: Continuous pixel health monitoring with automatic Direct → Canvas2D-Staging → Safe WebRender GPU fallback guarantees zero black or pink screens on any Mali, Adreno, Xclipse, or PowerVR GPU.
-- **Real-Time FPS Telemetry**: Accurately tracks live decoded Source FPS (via MediaCodec `getVideoPlaybackQuality()`) and shader Output FPS in both normal and fullscreen views.
+- **Real-Time FPS Telemetry**: Accurately tracks live decoded Source FPS and shader Output FPS in both normal and fullscreen views.
 
-### 📐 Non-Blocking Fullscreen & True Video Scaling
-- **Native Web Player Compatibility**: Uses a compact, auto-collapsing **Fullscreen Tools Corner Pill** so 99% of the screen stays untouched — tap play/pause, seek, subtitles, and quality controls directly on YouTube or any anime site without obstruction.
-- **Universal Aspect Scaling**: Switch seamlessly between **Fit**, **Fill (Crop)**, **Stretch (Edge-to-Edge)**, **Zoom (1.25×)**, **Custom Zoom (0.5×–3.0×)**, and **Original** across inline players, YouTube, and embedded fullscreen iframes on 16:9, 20:9, and 21:9 screens.
-- **Picture-in-Picture & Force Fullscreen**: Pop out videos into Android PiP or force fullscreen on players that hide their fullscreen button.
+### 📐 Non-Blocking Fullscreen, Auto Picture-in-Picture & Crisp Video Scaling
+- **Automatic Picture-in-Picture Pop-Up Mode**: Minimize ZenithFox while watching anime or YouTube and it seamlessly pops out into a clean floating PiP window — and resumes back to full screen with zero black screens.
+- **Essential Anime Player Controls**: Instant **-10s / Play-Pause / +10s**, one-tap **+85s Anime OP Intro Skip**, **0.5×–2.0× Playback Speed**, **Mute**, and **Subtitles** right inside the non-blocking video tools panel and fullscreen corner pill.
+- **Crisp Native Aspect Scaling**: Switch between **Fit**, **Fill (Crop)**, **Stretch (Edge-to-Edge)**, **Zoom (1.25×)**, **Custom Zoom (0.5×–3.0×)**, and **Original** using native hardware `object-fit` (zero double-stretch blur on YouTube).
 
-### ⬇️ Smart Video-Only Downloader
-- **Clean Video Detection**: Automatically captures real playing **HLS (`.m3u8`)** and **direct MP4 / WebM** video streams while filtering out webpage HTML, ads, scripts, and stray subtitle fragments.
-- **Quality & Estimated File Size**: Parses HLS master playlists to display selectable resolutions (**1080p / 720p / 480p / 360p**) alongside estimated file sizes in MB/GB before you download.
-- **Built-In Download Manager**: Track active downloads with live progress, pause/cancel/retry controls, and quick open/delete actions.
+### ⬇️ Smart Video-Only Downloader & Automatic GitHub Updates
+- **Reliable Video Stream Detection**: Automatically captures real playing **HLS (`.m3u8`, including proxied playlists)** and **direct MP4 / WebM (including HTTP 206 streams)** while filtering out ads, scripts, and stray fragments.
+- **Quality & Estimated File Size**: Parses HLS master playlists to display selectable resolutions (**1080p / 720p / 480p / 360p**) alongside estimated file sizes before you download.
+- **Built-In GitHub Releases Auto-Updater**: Configure your GitHub `owner/repo` in **Settings → App Updates** to automatically scan for new APK releases with **Install Update**, **Skip Version**, and **Ignore** options.
 
 ### 🛡️ Built-In Ad, Tracker & Redirect Shield
 - **Network + Cosmetic Blocking**: Built-in GeckoView WebExtension blocks ad networks, trackers, pop-unders, and malicious redirect chains before they open.
@@ -53,7 +52,7 @@ ZenithFox Browser works on **any 64-bit Android phone (`arm64-v8a`, Android 7.0 
 
 ### Option 1: Download from GitHub Releases (Recommended)
 1. Go to the [**Releases**](../../releases) section on the right side of this repository.
-2. Under the latest release (**v1.6.0**), download **`ZenithFoxBrowser.apk`** (or `app-debug.apk` / `app-release.apk`).
+2. Under the latest release (**v1.7.0**), download **`ZenithFoxBrowser.apk`** (or `app-debug.apk` / `app-release.apk`).
 3. Open the downloaded `.apk` file on your Android device.
 4. If prompted, enable **Install unknown apps** for your browser or file manager.
 5. Tap **Install** and launch **ZenithFox Browser**!
@@ -68,9 +67,9 @@ ZenithFox Browser works on **any 64-bit Android phone (`arm64-v8a`, Android 7.0 
 
 ## 💡 Quick Tips After Installing
 - **4K Upscaling & Frame Gen**: Start playing any video, tap the floating tune button (or the top-right **Tools pill** in fullscreen), and pick **Anime 4K Ultra**, **4K Crisp Sharpen**, or toggle **Frame Generation**.
-- **Video Scaling on Tall Phones (20:9 / 21:9)**: In fullscreen, tap the top-right pill and cycle to **Fill** (removes black bars with zero distortion) or **Stretch** (edge-to-edge full screen).
-- **Live FPS HUD**: Enable **Live Performance HUD** in **Settings** to see real-time display Hz, RAM, thermal status, and live video Source/Output FPS in both portrait and fullscreen modes.
-- **Note on DRM Streams**: Widevine/DRM-encrypted platforms (such as Netflix or Crunchyroll DRM streams) restrict GPU pixel access at the OS level; ZenithFox Browser automatically detects DRM and cleanly preserves native playback + video scaling without black screens.
+- **Auto Picture-in-Picture**: Simply press Home or minimize while an anime or YouTube video is playing — ZenithFox automatically opens a clean floating pop-up video window (can be toggled in **Settings → Video & Enhancement Defaults**).
+- **One-Tap Anime OP Skip**: Tap **+85s** in the fullscreen corner pill or Video Tools sheet to jump straight past anime openings.
+- **Automatic GitHub APK Updates**: Enter your GitHub repository (`owner/repo`) once in **Settings → App Updates** to receive automatic update prompts whenever you publish a new release.
 
 ---
 

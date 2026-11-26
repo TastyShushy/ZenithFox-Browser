@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
@@ -60,6 +61,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.ToolbarPosition
 import com.example.engine.UrlUtils
+import com.example.ui.components.AppUpdateDialog
 import com.example.ui.components.BrowserAddressBar
 import com.example.ui.components.BrowserBottomNavBar
 import com.example.ui.components.BrowserMenuBottomSheet
@@ -85,12 +87,22 @@ import com.example.ui.screens.VideoDownloaderSheet
 import com.example.ui.screens.VideoEnhancementSheet
 import com.example.ui.theme.AnimeBrowserTheme
 import com.example.viewmodel.BrowserViewModel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.mozilla.geckoview.GeckoView
 
 class MainActivity : ComponentActivity() {
 
   private val viewModel: BrowserViewModel by viewModels()
   private var isLandscapeLocked = false
+  private val _isInPipMode = MutableStateFlow(false)
+  private val isInPipMode: StateFlow<Boolean> = _isInPipMode.asStateFlow()
+
+  private var activeGeckoView: GeckoView? = null
+  private var canAutoEnterPip: Boolean = false
+  private var lastVideoWidth: Int = 16
+  private var lastVideoHeight: Int = 9
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -100,17 +112,66 @@ class MainActivity : ComponentActivity() {
     setContent {
       AnimeBrowserRoot(
         viewModel = viewModel,
+        isInPipModeFlow = isInPipMode,
+        onRegisterGeckoView = { view -> activeGeckoView = view },
         onToggleFullscreenWindow = ::applyImmersiveFullscreen,
         onToggleOrientation = ::toggleOrientation,
         onKeepScreenAwake = ::setKeepScreenAwake,
-        onEnterPip = ::tryEnterPipMode
+        onEnterPip = ::tryEnterPipMode,
+        onUpdatePipParams = ::updatePipParams
       )
+    }
+  }
+
+  override fun onResume() {
+    super.onResume()
+    // Re-activate GeckoSession and force a clean surface repaint so returning from
+    // background minimize or Picture-in-Picture NEVER leaves a stuck black screen!
+    viewModel.onAppForegrounded()
+    refreshGeckoSurface()
+  }
+
+  override fun onStop() {
+    super.onStop()
+    viewModel.onAppBackgrounded(inPip = _isInPipMode.value)
+  }
+
+  override fun onUserLeaveHint() {
+    super.onUserLeaveHint()
+    // Android 8.0–11 fallback for automatic Picture-in-Picture when user minimizes while watching video
+    if (Build.VERSION.SDK_INT in Build.VERSION_CODES.O until Build.VERSION_CODES.S && canAutoEnterPip) {
+      tryEnterPipMode(silent = true)
+    }
+  }
+
+  override fun onPictureInPictureModeChanged(
+    isInPictureInPictureMode: Boolean,
+    newConfig: Configuration
+  ) {
+    super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+    _isInPipMode.value = isInPictureInPictureMode
+    if (!isInPictureInPictureMode) {
+      // Returning from PiP to full app window — reactivate session & repaint surface cleanly
+      viewModel.onAppForegrounded()
+      refreshGeckoSurface()
+    } else {
+      // Inside PiP: keep GeckoSession active so playback continues smoothly in the pop-up window
+      viewModel.onAppForegrounded()
     }
   }
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     handleIncomingBrowserIntent(intent)
+  }
+
+  private fun refreshGeckoSurface() {
+    activeGeckoView?.let { gv ->
+      gv.post {
+        gv.requestLayout()
+        gv.invalidate()
+      }
+    }
   }
 
   private fun handleIncomingBrowserIntent(intent: Intent?) {
@@ -123,6 +184,7 @@ class MainActivity : ComponentActivity() {
   }
 
   private fun applyImmersiveFullscreen(fullscreen: Boolean, autoLandscape: Boolean) {
+    if (_isInPipMode.value) return
     val controller = WindowCompat.getInsetsController(window, window.decorView)
     if (fullscreen) {
       controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -157,16 +219,53 @@ class MainActivity : ComponentActivity() {
     }
   }
 
-  private fun tryEnterPipMode() {
+  /**
+   * Computes a safe Android Picture-in-Picture Rational aspect ratio strictly clamped
+   * inside Android's required [0.42 .. 2.38] bounds so ultrawide or vertical videos never crash.
+   */
+  private fun safePipAspectRatio(width: Int, height: Int): Rational {
+    val w = if (width > 0) width else 16
+    val h = if (height > 0) height else 9
+    val ratio = w.toDouble() / h.toDouble()
+    return when {
+      ratio < 0.45 -> Rational(9, 20)
+      ratio > 2.35 -> Rational(21, 9)
+      else -> Rational(w.coerceAtMost(1920), h.coerceAtMost(1920))
+    }
+  }
+
+  private fun updatePipParams(canAutoEnter: Boolean, videoWidth: Int, videoHeight: Int) {
+    canAutoEnterPip = canAutoEnter
+    if (videoWidth > 0 && videoHeight > 0) {
+      lastVideoWidth = videoWidth
+      lastVideoHeight = videoHeight
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      runCatching {
+        val builder = PictureInPictureParams.Builder()
+          .setAspectRatio(safePipAspectRatio(lastVideoWidth, lastVideoHeight))
+          .setAutoEnterEnabled(canAutoEnter)
+          .setSeamlessResizeEnabled(true)
+        setPictureInPictureParams(builder.build())
+      }
+    }
+  }
+
+  private fun tryEnterPipMode(silent: Boolean = false) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      val params = PictureInPictureParams.Builder()
-        .setAspectRatio(Rational(16, 9))
-        .build()
-      runCatching { enterPictureInPictureMode(params) }
+      val builder = PictureInPictureParams.Builder()
+        .setAspectRatio(safePipAspectRatio(lastVideoWidth, lastVideoHeight))
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        builder.setAutoEnterEnabled(canAutoEnterPip)
+        builder.setSeamlessResizeEnabled(true)
+      }
+      runCatching { enterPictureInPictureMode(builder.build()) }
         .onFailure {
-          Toast.makeText(this, "Picture-in-Picture is unavailable on this device", Toast.LENGTH_SHORT).show()
+          if (!silent) {
+            Toast.makeText(this, "Picture-in-Picture is unavailable on this device", Toast.LENGTH_SHORT).show()
+          }
         }
-    } else {
+    } else if (!silent) {
       Toast.makeText(this, "Picture-in-Picture requires Android 8.0+", Toast.LENGTH_SHORT).show()
     }
   }
@@ -175,10 +274,13 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun AnimeBrowserRoot(
   viewModel: BrowserViewModel,
+  isInPipModeFlow: StateFlow<Boolean>,
+  onRegisterGeckoView: (GeckoView?) -> Unit,
   onToggleFullscreenWindow: (fullscreen: Boolean, autoLandscape: Boolean) -> Unit,
   onToggleOrientation: () -> Unit,
   onKeepScreenAwake: (Boolean) -> Unit,
-  onEnterPip: () -> Unit
+  onEnterPip: () -> Unit,
+  onUpdatePipParams: (canAutoEnter: Boolean, videoWidth: Int, videoHeight: Int) -> Unit
 ) {
   val context = LocalContext.current
   val settings by viewModel.settings.collectAsStateWithLifecycle()
@@ -213,6 +315,10 @@ private fun AnimeBrowserRoot(
   val blockedRedirectUrl by viewModel.blockedRedirectUrl.collectAsStateWithLifecycle()
   val pendingSitePermission by viewModel.pendingSitePermission.collectAsStateWithLifecycle()
   val pendingAndroidPermission by viewModel.pendingAndroidPermission.collectAsStateWithLifecycle()
+  val availableUpdate by viewModel.availableUpdate.collectAsStateWithLifecycle()
+  val updateDownloadState by viewModel.updateDownloadState.collectAsStateWithLifecycle()
+  val isCheckingForUpdate by viewModel.isCheckingForUpdate.collectAsStateWithLifecycle()
+  val isInPipMode by isInPipModeFlow.collectAsStateWithLifecycle()
 
   var currentRoute by remember { mutableStateOf(BrowserScreenRoute.BROWSER) }
   var showMenuSheet by remember { mutableStateOf(false) }
@@ -225,6 +331,7 @@ private fun AnimeBrowserRoot(
 
   val snackbarHostState = remember { SnackbarHostState() }
   val isAnyFullscreen = isWebFullScreen || isForceFullScreen
+  val hideBrowserChrome = isAnyFullscreen || isInPipMode
 
   // Runtime Android Permission Launcher bridged to GeckoView PermissionDelegate
   val androidPermissionLauncher = rememberLauncherForActivityResult(
@@ -240,12 +347,43 @@ private fun AnimeBrowserRoot(
     }
   }
 
-  LaunchedEffect(isAnyFullscreen, settings.autoLandscapeFullscreen) {
-    onToggleFullscreenWindow(isAnyFullscreen, settings.autoLandscapeFullscreen)
+  LaunchedEffect(isAnyFullscreen, settings.autoLandscapeFullscreen, isInPipMode) {
+    if (!isInPipMode) {
+      onToggleFullscreenWindow(isAnyFullscreen, settings.autoLandscapeFullscreen)
+    }
   }
 
   LaunchedEffect(videoTelemetry.isPlaying, settings.keepScreenAwakeVideo) {
     onKeepScreenAwake(videoTelemetry.isPlaying && settings.keepScreenAwakeVideo)
+  }
+
+  // Keep Android Picture-in-Picture auto-enter parameters synced with live playing video state!
+  LaunchedEffect(
+    currentRoute,
+    activeTab?.isHomePage,
+    videoTelemetry.hasVideo,
+    videoTelemetry.isPlaying,
+    videoTelemetry.videoWidth,
+    videoTelemetry.videoHeight,
+    settings.autoPipOnMinimize
+  ) {
+    val canAutoPip = settings.autoPipOnMinimize &&
+      currentRoute == BrowserScreenRoute.BROWSER &&
+      activeTab?.isHomePage == false &&
+      videoTelemetry.hasVideo &&
+      videoTelemetry.isPlaying
+    onUpdatePipParams(canAutoPip, videoTelemetry.videoWidth, videoTelemetry.videoHeight)
+  }
+
+  // Close transient sheets cleanly when entering PiP so the pop-up shows pure video
+  LaunchedEffect(isInPipMode) {
+    if (isInPipMode) {
+      showMenuSheet = false
+      showEnhancerSheet = false
+      showVideoControlPanel = false
+      showVideoDownloaderSheet = false
+      showFindInPage = false
+    }
   }
 
   LaunchedEffect(statusMessage) {
@@ -381,15 +519,17 @@ private fun AnimeBrowserRoot(
         onOpenPrivacy = { currentRoute = BrowserScreenRoute.PRIVACY },
         onOpenSitePermissions = { currentRoute = BrowserScreenRoute.SITE_PERMISSIONS },
         onOpenExtensions = { currentRoute = BrowserScreenRoute.EXTENSIONS },
-        onBack = { currentRoute = BrowserScreenRoute.BROWSER }
+        onBack = { currentRoute = BrowserScreenRoute.BROWSER },
+        isCheckingForUpdate = isCheckingForUpdate,
+        onCheckForUpdates = { viewModel.checkForUpdates(manual = true) }
       )
 
       BrowserScreenRoute.BROWSER -> {
         Scaffold(
           containerColor = MaterialTheme.colorScheme.background,
-          snackbarHost = { SnackbarHost(snackbarHostState) },
+          snackbarHost = { if (!isInPipMode) SnackbarHost(snackbarHostState) },
           topBar = {
-            if (!isAnyFullscreen && settings.toolbarPosition == ToolbarPosition.TOP) {
+            if (!hideBrowserChrome && settings.toolbarPosition == ToolbarPosition.TOP) {
               Column(modifier = Modifier.statusBarsPadding()) {
                 BrowserAddressBar(
                   tab = activeTab,
@@ -423,7 +563,7 @@ private fun AnimeBrowserRoot(
             }
           },
           bottomBar = {
-            if (!isAnyFullscreen) {
+            if (!hideBrowserChrome) {
               Column {
                 if (settings.toolbarPosition == ToolbarPosition.BOTTOM) {
                   AnimatedVisibility(visible = showFindInPage) {
@@ -474,7 +614,7 @@ private fun AnimeBrowserRoot(
           Box(
             modifier = Modifier
               .fillMaxSize()
-              .then(if (isAnyFullscreen) Modifier else Modifier.padding(innerPadding))
+              .then(if (hideBrowserChrome) Modifier else Modifier.padding(innerPadding))
               .background(MaterialTheme.colorScheme.background)
           ) {
             val currentTab = activeTab
@@ -503,11 +643,12 @@ private fun AnimeBrowserRoot(
               GeckoTabWebView(
                 tabId = currentTab.id,
                 getSession = { viewModel.getSessionForTab(currentTab) },
+                onRegisterGeckoView = onRegisterGeckoView,
                 modifier = Modifier.fillMaxSize()
               )
 
-              // Floating Video Controls & Video Downloader FAB column (when video or stream detected)
-              if ((videoTelemetry.hasVideo || detectedStreams.isNotEmpty()) && !isAnyFullscreen) {
+              // Floating Video Controls & Video Downloader FAB column (hidden during Fullscreen and PiP)
+              if ((videoTelemetry.hasVideo || detectedStreams.isNotEmpty()) && !hideBrowserChrome) {
                 Column(
                   horizontalAlignment = Alignment.CenterHorizontally,
                   verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -545,8 +686,8 @@ private fun AnimeBrowserRoot(
                 }
               }
 
-              // Non-blocking Fullscreen Floating Corner Pill (99% of screen passes clicks straight to the site's native video player!)
-              if (isAnyFullscreen) {
+              // Non-blocking Fullscreen Floating Corner Pill (hidden in PiP so PiP shows clean video)
+              if (isAnyFullscreen && !isInPipMode) {
                 FullscreenToolsCornerPill(
                   telemetry = videoTelemetry,
                   scalingMode = scalingMode,
@@ -557,6 +698,7 @@ private fun AnimeBrowserRoot(
                   onOpenEnhancer = { showEnhancerSheet = true },
                   onOpenDownloader = { showVideoDownloaderSheet = true },
                   onOpenControlPanel = { showVideoControlPanel = true },
+                  onSkipIntro85 = { viewModel.seekVideoBy(85.0) },
                   onToggleOrientation = onToggleOrientation,
                   onEnterPip = onEnterPip,
                   onExitFullscreen = viewModel::exitAnyFullscreen,
@@ -565,8 +707,8 @@ private fun AnimeBrowserRoot(
               }
             }
 
-            // Optional Live Performance HUD Overlay (works in BOTH normal & fullscreen modes!)
-            if (settings.showPerformanceOverlay) {
+            // Optional Live Performance HUD Overlay (works in normal & fullscreen; hidden in tiny PiP window)
+            if (settings.showPerformanceOverlay && !isInPipMode) {
               PerformanceHudChip(
                 stats = perfStats,
                 videoTelemetry = videoTelemetry,
@@ -641,7 +783,12 @@ private fun AnimeBrowserRoot(
         onSelectScalingMode = viewModel::setScalingMode,
         onOpenEnhancer = { showEnhancerSheet = true },
         onOpenDownloader = { showVideoDownloaderSheet = true },
-        onEnterPip = onEnterPip
+        onEnterPip = onEnterPip,
+        onTogglePlayPause = viewModel::toggleVideoPlayPause,
+        onSeekBy = viewModel::seekVideoBy,
+        onSetSpeed = viewModel::setVideoPlaybackSpeed,
+        onToggleMute = viewModel::toggleVideoMute,
+        onToggleSubtitles = viewModel::toggleVideoSubtitles
       )
     }
 
@@ -683,6 +830,23 @@ private fun AnimeBrowserRoot(
         onDecision = viewModel::resolvePendingSitePermission
       )
     }
+
+    availableUpdate?.let { release ->
+      if (!isInPipMode) {
+        AppUpdateDialog(
+          release = release,
+          downloadState = updateDownloadState,
+          onInstallUpdate = viewModel::installAvailableUpdate,
+          onOpenReleasePage = { url ->
+            viewModel.ignoreAvailableUpdate()
+            currentRoute = BrowserScreenRoute.BROWSER
+            viewModel.navigateActiveTab(url)
+          },
+          onSkipVersion = viewModel::skipAvailableUpdate,
+          onIgnoreForNow = viewModel::ignoreAvailableUpdate
+        )
+      }
+    }
     }
   }
 }
@@ -691,6 +855,7 @@ private fun AnimeBrowserRoot(
 private fun GeckoTabWebView(
   tabId: String,
   getSession: () -> org.mozilla.geckoview.GeckoSession,
+  onRegisterGeckoView: (GeckoView?) -> Unit,
   modifier: Modifier = Modifier
 ) {
   // Memoize session lookup strictly by tabId so frequent telemetry / slider recompositions
@@ -700,6 +865,7 @@ private fun GeckoTabWebView(
 
   DisposableEffect(Unit) {
     onDispose {
+      onRegisterGeckoView(null)
       geckoViewRef?.releaseSession()
     }
   }
@@ -707,12 +873,17 @@ private fun GeckoTabWebView(
   AndroidView(
     factory = { ctx ->
       GeckoView(ctx).apply {
-        coverUntilFirstPaint(android.graphics.Color.BLACK)
+        // NOTE: Do NOT call coverUntilFirstPaint(Color.BLACK) here — on Android 12–16,
+        // minimizing the app or returning from Picture-in-Picture recreates SurfaceView and
+        // leaves coverUntilFirstPaint stuck permanently black until full page reload!
+        setBackgroundColor(android.graphics.Color.TRANSPARENT)
         setSession(desiredSession)
         geckoViewRef = this
+        onRegisterGeckoView(this)
       }
     },
     update = { view ->
+      onRegisterGeckoView(view)
       if (view.session !== desiredSession) {
         view.releaseSession()
         view.setSession(desiredSession)

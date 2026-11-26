@@ -1,5 +1,5 @@
-// Content script for Anime Video Downloader:
-// Captures clean anime episode title and ONLY real loaded <video> streams (no webpages, no subtitles).
+// Content script for ZenithFox Video-Only Downloader:
+// Captures clean page title and real loaded <video>/<source> streams (zero webpages/subtitles).
 (function () {
   "use strict";
 
@@ -19,20 +19,24 @@
   function scanPlayingVideos() {
     const videos = document.querySelectorAll("video");
     videos.forEach((v) => {
-      // Only report actual loaded videos (ignore tiny UI animations or unloaded placeholders)
-      if (v.videoWidth < 240 || v.videoHeight < 140) return;
-      if (isFinite(v.duration) && v.duration > 0 && v.duration < 25) return; // Skip short ad clips < 25s
+      if (v.videoWidth < 200 || v.videoHeight < 120) return;
+      if (isFinite(v.duration) && v.duration > 0 && v.duration < 15) return; // Skip tiny ad clips
 
-      const isDrm = !!v.mediaKeys;
-      const quality = `${v.videoHeight}p`;
+      const quality = v.videoHeight > 0 ? `${v.videoHeight}p` : "";
       const candidates = [];
       if (v.currentSrc && v.currentSrc.startsWith("http")) candidates.push(v.currentSrc);
-      else if (v.src && v.src.startsWith("http")) candidates.push(v.src);
+      if (v.src && v.src.startsWith("http") && !candidates.includes(v.src)) candidates.push(v.src);
+      const sources = v.querySelectorAll("source");
+      sources.forEach((s) => {
+        if (s.src && s.src.startsWith("http") && !candidates.includes(s.src)) {
+          candidates.push(s.src);
+        }
+      });
 
       for (const url of candidates) {
         if (sent.has(url)) continue;
         sent.add(url);
-        const isHls = /\.m3u8(\?|#|$)/i.test(url);
+        const isHls = /(\.m3u8(\?|#|&|$)|%2em3u8)/i.test(url);
         try {
           browser.runtime.sendMessage({
             type: "DOM_VIDEO_FOUND",
@@ -44,7 +48,7 @@
               qualityLabel: quality,
               referer: location.href,
               origin: location.origin,
-              isDrmProtected: isDrm
+              isDrmProtected: false
             }
           }).catch(() => {});
         } catch (_) {}
@@ -52,10 +56,17 @@
     });
   }
 
+  browser.runtime.onMessage.addListener((msg) => {
+    if (msg && msg.type === "RESET_VIDEO_SCAN") {
+      sent.clear();
+      setTimeout(scanPlayingVideos, 400);
+    }
+  });
+
   reportTitle();
   scanPlayingVideos();
   setInterval(() => {
     reportTitle();
     scanPlayingVideos();
-  }, 2000);
+  }, 1800);
 })();

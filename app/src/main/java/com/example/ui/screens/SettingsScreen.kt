@@ -32,17 +32,26 @@ import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,6 +59,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import com.example.BuildConfig
 import com.example.data.model.AccentPalette
 import com.example.data.model.BrowserSettings
 import com.example.data.model.EnhancementPreset
@@ -70,7 +80,9 @@ fun SettingsScreen(
   onOpenPrivacy: () -> Unit,
   onOpenSitePermissions: () -> Unit,
   onOpenExtensions: () -> Unit,
-  onBack: () -> Unit
+  onBack: () -> Unit,
+  isCheckingForUpdate: Boolean = false,
+  onCheckForUpdates: () -> Unit = {}
 ) {
   BackHandler(onBack = onBack)
 
@@ -247,6 +259,9 @@ fun SettingsScreen(
             }
           }
 
+          ToggleRow("Auto Picture-in-Picture on Minimize", "Automatically pop out playing anime or videos into a floating window when minimizing", settings.autoPipOnMinimize) { v ->
+            onUpdateSettings { it.copy(autoPipOnMinimize = v) }
+          }
           ToggleRow("Auto-Landscape in Fullscreen", "Switch to landscape automatically when entering video fullscreen", settings.autoLandscapeFullscreen) { v ->
             onUpdateSettings { it.copy(autoLandscapeFullscreen = v) }
           }
@@ -301,6 +316,72 @@ fun SettingsScreen(
             TextButton(onClick = onOpenPrivacy) { Text("Privacy & Ad Shield") }
             TextButton(onClick = onOpenSitePermissions) { Text("Site Permissions") }
             TextButton(onClick = onOpenExtensions) { Text("Extensions") }
+          }
+        }
+      }
+
+      // 6. Automatic GitHub APK Updates
+      item {
+        var repoDraft by remember { mutableStateOf(settings.updateRepoSlug) }
+        LaunchedEffect(settings.updateRepoSlug) {
+          if (settings.updateRepoSlug != repoDraft) {
+            repoDraft = settings.updateRepoSlug
+          }
+        }
+        SettingsSectionCard("App Updates (GitHub Releases)", Icons.Filled.SystemUpdate) {
+          Text(
+            text = "Installed Version: ZenithFox Browser v${BuildConfig.VERSION_NAME}",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.primary
+          )
+          ToggleRow(
+            "Auto-Check GitHub Releases",
+            "Automatically scan for newer APK releases when the app starts",
+            settings.autoCheckUpdates
+          ) { v ->
+            onUpdateSettings { it.copy(autoCheckUpdates = v) }
+          }
+          OutlinedTextField(
+            value = repoDraft,
+            onValueChange = { input ->
+              repoDraft = input
+              onUpdateSettings { it.copy(updateRepoSlug = input.trim(), skippedUpdateVersion = "") }
+            },
+            label = { Text("GitHub Repository (owner/repo)") },
+            placeholder = { Text("your-username/ZenithFox-Browser") },
+            supportingText = {
+              Text("Paste your GitHub repo slug or URL. ZenithFox will prompt Install / Skip / Ignore when a newer APK release is published.")
+            },
+            singleLine = true,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("settings_update_repo_input")
+          )
+          if (settings.skippedUpdateVersion.isNotBlank()) {
+            Text(
+              text = "Skipped version: ${settings.skippedUpdateVersion}",
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+          }
+          Button(
+            onClick = onCheckForUpdates,
+            enabled = !isCheckingForUpdate,
+            modifier = Modifier
+              .fillMaxWidth()
+              .testTag("settings_check_updates_button")
+          ) {
+            if (isCheckingForUpdate) {
+              CircularProgressIndicator(
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.onPrimary,
+                modifier = Modifier.size(18.dp)
+              )
+              Spacer(modifier = Modifier.size(8.dp))
+              Text("Scanning GitHub Releases...")
+            } else {
+              Text("Check for Updates Now")
+            }
           }
         }
       }

@@ -532,6 +532,18 @@ class GeckoEngineManager(
     }
   }
 
+  fun reactivateSession(tabId: String) {
+    sessions[tabId]?.let { session ->
+      runCatching {
+        if (!session.isOpen) {
+          session.open(ensureRuntime())
+        }
+        session.setActive(true)
+        session.setFocused(true)
+      }
+    }
+  }
+
   fun updateDetectedStreamSize(url: String, sizeBytes: Long) {
     if (sizeBytes <= 0L) return
     _detectedStreams.update { list ->

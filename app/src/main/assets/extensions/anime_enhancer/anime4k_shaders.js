@@ -1,19 +1,27 @@
-// ZenithFox Browser v1.6.0 — Single-Pass High-Precision (FP32) WebGL2 4K Anime Super-Resolution & Frame Gen Engine
-// Architecture:
-//   - Single-Pass FP32 (precision highp float) WebGL2 Shader (ZERO FBOs -> 2x faster, zero Mali FP16 NaN/pink glitches!)
-//   - Smooth Lucas-Kanade Motion-Compensated Frame Generation (MCFI) with scene-cut & ghosting guard
-//   - Edge-Preserving Bilateral Compression Denoise + Anti-Banding Sky Reconstruction
-//   - True Anime4K Directional Line-Thinning & Ink-Line Darkening (Scharr Gradient Push)
-//   - NaN-Free AMD FidelityFX CAS (Contrast-Adaptive Sharpening) + Dual-Scale 4K Micro-Detail Pop
-//   - Luma-Preserving HDR Cel Micro-Contrast & Selective Vibrance + Live Before/After Split Compare
+// ZenithFox Browser v1.7.0 — Clean-Sheet Zero-Black-Screen 4K WebGL2 Engine & GPU Frame Generation
 //
-// Bulletproof Zero-Black / Zero-Pink Screen Safeguards:
-//   1. Dual Video Upload Path: DIRECT texImage2D(video) -> Automatic CANVAS_2D_STAGING (bypasses GeckoView
-//      Android MediaCodec OES SurfaceTexture WebGL blit bug while keeping FULL 4K WebGL2 shaders!) -> SAFE_CSS_GPU.
-//   2. Continuous 5-point pixel health monitor on startup, after EVERY resize/fullscreen/preset change,
-//      and every 1.2s during active playback. Canvas remains invisible (opacity:0) until verified OK.
-//   3. Temporal buffers automatically flush on seeked / pause / emptied / loadeddata (zero ghosting/flicker).
-//   4. Smart GPU frame-time budget guard (steps down 4K -> 1440p -> 1080p if render time > 24ms).
+// Why previous Android GeckoView WebGL2 upscalers showed BLACK or PINK screens:
+//   On Android GeckoView (Mali-G615 / Adreno / Xclipse), calling gl.texImage2D(..., HTMLVideoElement)
+//   invokes a broken zero-copy MediaCodec SurfaceTexture (GL_TEXTURE_EXTERNAL_OES) blit that fills the
+//   WebGL texture with solid magenta/pink or pure black while gl.getError() reports NO_ERROR.
+//
+// Clean-Sheet Solution:
+//   1. CPU-Verified RGBA Staging Bridge:
+//      Draws <video> into a software-backed 2D canvas ({ willReadFrequently: true }), reads pure RGBA
+//      bytes via getImageData(), runs an instant 9-point CPU pixel check (rejecting black, pink/magenta,
+//      green, or uniform frames BEFORE touching WebGL), then uploads pure Uint8Array pixels via
+//      gl.texImage2D(..., Uint8Array) — 100% immune to Android's SurfaceTexture OES black/pink bug!
+//   2. High-Precision (FP32) Single-Pass WebGL2 4K GPU Engine:
+//      - Crisp 5-tap Catmull-Rom super-resolution resampling (zero bilinear mush)
+//      - True Anime4K directional line-thinning & ink darkening (Scharr gradient push)
+//      - NaN-Free AMD FidelityFX CAS (Contrast-Adaptive Sharpening) + Dual-Scale 4K Micro-Detail
+//      - Luma-preserving HDR cel micro-contrast & selective saturation pop
+//      - Smooth GPU Optical-Flow Frame Generation (MCFI) running 100% on GPU between verified frames
+//      - Interactive Live Before / After Split-Screen Comparison Divider
+//   3. Zero-Black-Screen Guarantee:
+//      Canvas stays invisible (opacity: 0) until BOTH CPU 9-point AND WebGL 5-point checks pass.
+//      If a cross-origin stream throws SecurityError or fails pixel verification, canvas stays hidden
+//      and a clean WebRender-safe GPU clarity/contrast/vibrance filter enhances <video> directly.
 (function (globalScope) {
   "use strict";
 
@@ -27,9 +35,6 @@
     }
   `;
 
-  // Single-Pass High-Precision (FP32) WebGL2 Shader:
-  // Motion-Compensated Frame Gen + Bilateral Denoise + Anti-Banding + Anime4K Line-Thinning +
-  // NaN-Free AMD FidelityFX CAS + Dual-Scale 4K Micro-Detail + HDR Cel Contrast + Split Compare
   const FRAGMENT_SHADER_GL2 = `#version 300 es
     precision highp float;
 
@@ -69,9 +74,49 @@
       return texture(uTexPrev, clamp(uv, vec2(0.0005), vec2(0.9995))).rgb;
     }
 
-    // Smooth Motion-Compensated Bidirectional Optical-Flow Frame Generation (MCFI)
+    // Crisp 5-tap Catmull-Rom subpixel super-resolution sampling (eliminates bilinear blur!)
+    vec3 sampleCatmullRomCurr(vec2 uv) {
+      vec2 texSize = 1.0 / max(uSrcTexelSize, vec2(0.0001));
+      vec2 samplePos = uv * texSize;
+      vec2 tc1 = floor(samplePos - 0.5) + 0.5;
+      vec2 f = samplePos - tc1;
+      vec2 f2 = f * f;
+      vec2 f3 = f2 * f;
+
+      vec2 w0 = f2 - 0.5 * (f3 + f);
+      vec2 w1 = 1.5 * f3 - 2.5 * f2 + 1.0;
+      vec2 w3 = 0.5 * (f3 - f2);
+      vec2 w2 = 1.0 - w0 - w1 - w3;
+
+      vec2 w12 = w1 + w2;
+      vec2 offset12 = w2 / max(w12, vec2(0.001));
+
+      vec2 tc0  = (tc1 - 1.0) * uSrcTexelSize;
+      vec2 tc3  = (tc1 + 2.0) * uSrcTexelSize;
+      vec2 tc12 = (tc1 + offset12) * uSrcTexelSize;
+
+      vec3 c0 = tapCurr(vec2(tc12.x, tc0.y));
+      vec3 c1 = tapCurr(vec2(tc0.x,  tc12.y));
+      vec3 c2 = tapCurr(vec2(tc12.x, tc12.y));
+      vec3 c3 = tapCurr(vec2(tc3.x,  tc12.y));
+      vec3 c4 = tapCurr(vec2(tc12.x, tc3.y));
+
+      float cw0 = w12.x * w0.y;
+      float cw1 = w0.x  * w12.y;
+      float cw2 = w12.x * w12.y;
+      float cw3 = w3.x  * w12.y;
+      float cw4 = w12.x * w3.y;
+
+      vec3 sum = c0 * cw0 + c1 * cw1 + c2 * cw2 + c3 * cw3 + c4 * cw4;
+      vec3 res = sum / max(cw0 + cw1 + cw2 + cw3 + cw4, 0.001);
+      vec3 minC = min(c2, min(min(c0, c4), min(c1, c3)));
+      vec3 maxC = max(c2, max(max(c0, c4), max(c1, c3)));
+      return clamp(res, minC, maxC);
+    }
+
+    // Smooth GPU Optical-Flow Motion-Compensated Frame Generation (MCFI)
     vec3 sampleMotionBase(vec2 uv, vec3 currCenter) {
-      if (uInterpEnabled < 0.5 || uAlpha >= 0.97 || uAlpha <= 0.03) {
+      if (uInterpEnabled < 0.5 || uAlpha >= 0.96 || uAlpha <= 0.04) {
         return currCenter;
       }
       vec3 prevCenter = tapPrev(uv);
@@ -79,7 +124,7 @@
       float lPrev = luma(prevCenter);
       float it = lCurr - lPrev;
 
-      // Hard scene-cut guard: avoid ghosting across anime cuts & camera flashes
+      // Scene-cut protection: avoid ghosting across sudden anime cuts
       if (abs(it) > 0.28) {
         return currCenter;
       }
@@ -95,7 +140,7 @@
       ) * 0.25;
 
       float denom = ix * ix + iy * iy + 0.008;
-      vec2 flow = clamp(vec2(-it * ix / denom, -it * iy / denom), vec2(-2.2), vec2(2.2));
+      vec2 flow = clamp(vec2(-it * ix / denom, -it * iy / denom), vec2(-2.4), vec2(2.4));
       vec2 flowUv = flow * step2;
 
       vec3 warpedPrev = tapPrev(uv - flowUv * uAlpha);
@@ -110,10 +155,9 @@
     void main() {
       vec3 rawCurr = tapCurr(vUv);
 
-      // Optional Live Before / After Split-Screen Comparison
+      // Interactive Live Before / After Split-Screen Comparison
       if (uSplitCompare > 0.5) {
         if (abs(vUv.x - uSplitPos) < max(0.0022, uOutTexelSize.x * 2.5)) {
-          // Luminous ZenithFox violet divider line
           fragColor = vec4(0.753, 0.518, 0.988, 1.0);
           return;
         }
@@ -123,17 +167,18 @@
         }
       }
 
-      // 1. Frame Generation center sample (or direct frame if disabled)
-      vec3 c = sampleMotionBase(vUv, rawCurr);
+      // 1. Crisp Catmull-Rom base sample + optional GPU Frame Generation
+      vec3 crispBase = (uUpscaleStrength > 0.01 || uSharpen > 0.01)
+        ? sampleCatmullRomCurr(vUv)
+        : rawCurr;
+      vec3 c = sampleMotionBase(vUv, crispBase);
 
-      // Fast path if ONLY Frame Generation is enabled (enhancer off)
       float anyEnhance = uUpscaleStrength + uSharpen + uDeband + uDenoise + uEdgeEnhance + uVibrance;
       if (anyEnhance < 0.01) {
         fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
         return;
       }
 
-      // 3x3 source-grid neighborhood (aligned to source texel grid so 720p/1080p edges sharpen crisply at 4K!)
       vec2 dx = vec2(uSrcTexelSize.x, 0.0);
       vec2 dy = vec2(0.0, uSrcTexelSize.y);
 
@@ -158,7 +203,7 @@
 
       vec3 result = c;
 
-      // 2. Edge-Preserving Bilateral Compression Denoise (removes 720p/1080p stream blockiness)
+      // 2. Edge-Preserving Bilateral Compression Denoise
       if (uDenoise > 0.01) {
         float sigma = mix(0.020, 0.095, uDenoise);
         float wn  = exp(-abs(ln  - lc) / sigma);
@@ -171,7 +216,7 @@
         float wse = exp(-abs(lse - lc) / sigma) * 0.5;
         float wSum = 1.0 + wn + ws + ww + we + wnw + wne + wsw + wse;
         vec3 denoised = (c + n*wn + s*ws + w*ww + e*we + nw*wnw + ne*wne + sw*wsw + se*wse) / wSum;
-        result = mix(result, denoised, uDenoise * 0.62);
+        result = mix(result, denoised, uDenoise * 0.58);
       }
 
       // 3. Anti-Banding Sky & Gradient Reconstruction
@@ -187,14 +232,14 @@
         float threshold = mix(0.010, 0.046, uDeband);
         float flatMask = 1.0 - smoothstep(threshold * 0.45, threshold, maxDiff);
         float dither = (hash12(vUv * 1024.0) - 0.5) * (0.0038 * uDeband);
-        result = mix(result, bandAvg + vec3(dither), flatMask * uDeband * 0.72);
+        result = mix(result, bandAvg + vec3(dither), flatMask * uDeband * 0.70);
       }
 
-      // 4. True Anime4K Directional Line-Thinning & Ink-Line Darkening (Scharr Operator)
+      // 4. True Anime4K Directional Line-Thinning & Ink-Line Darkening
       if (uUpscaleStrength > 0.01 || uEdgeEnhance > 0.01) {
         float gx = (-3.0*lnw - 10.0*lw - 3.0*lsw + 3.0*lne + 10.0*le + 3.0*lse) * 0.0625;
         float gy = (-3.0*lnw - 10.0*ln - 3.0*lne + 3.0*lsw + 10.0*ls + 3.0*lse) * 0.0625;
-        float gradMag = clamp(sqrt(gx * gx + gy * gy) * 1.45, 0.0, 1.0);
+        float gradMag = clamp(sqrt(gx * gx + gy * gy) * 1.50, 0.0, 1.0);
 
         vec3 minCross = min(c, min(min(n, s), min(w, e)));
         vec3 maxCross = max(c, max(max(n, s), max(w, e)));
@@ -206,22 +251,21 @@
         float lDark  = luma(darkest);
         float lLight = luma(lightest);
         float contrastRange = lLight - lDark;
-        float edgeMask = smoothstep(0.032, 0.22, gradMag) * smoothstep(0.035, 0.20, contrastRange);
+        float edgeMask = smoothstep(0.030, 0.22, gradMag) * smoothstep(0.032, 0.20, contrastRange);
 
-        float thinAmount = clamp(uUpscaleStrength * 0.82 + uEdgeEnhance * 0.45, 0.0, 1.2) * edgeMask;
+        float thinAmount = clamp(uUpscaleStrength * 0.88 + uEdgeEnhance * 0.48, 0.0, 1.25) * edgeMask;
         float midLuma = (lDark + lLight) * 0.5;
         vec3 pushed = (lc < midLuma)
-          ? mix(result, darkest, clamp(thinAmount * 0.64, 0.0, 0.74))
-          : mix(result, lightest, clamp(thinAmount * 0.44, 0.0, 0.58));
+          ? mix(result, darkest, clamp(thinAmount * 0.66, 0.0, 0.76))
+          : mix(result, lightest, clamp(thinAmount * 0.46, 0.0, 0.60));
 
-        // Subtle dark-line ink darkening for crisp vector-like anime outlines
-        float isDarkLine = smoothstep(0.54, 0.14, lc) * edgeMask;
-        pushed *= (1.0 - isDarkLine * (uUpscaleStrength * 0.22 + uEdgeEnhance * 0.16));
+        float isDarkLine = smoothstep(0.55, 0.14, lc) * edgeMask;
+        pushed *= (1.0 - isDarkLine * (uUpscaleStrength * 0.24 + uEdgeEnhance * 0.16));
         result = pushed;
       }
 
       // 5. NaN-Free AMD FidelityFX CAS (Contrast-Adaptive Sharpening)
-      float casStrength = clamp(uSharpen * 0.95 + uUpscaleStrength * 0.45 + uEdgeEnhance * 0.35, 0.0, 1.3);
+      float casStrength = clamp(uSharpen * 1.0 + uUpscaleStrength * 0.50 + uEdgeEnhance * 0.35, 0.0, 1.35);
       if (casStrength > 0.01) {
         vec3 mnRGB = min(min(min(w, result), min(e, n)), s);
         vec3 mnRGB2 = min(mnRGB, min(min(nw, ne), min(sw, se)));
@@ -231,30 +275,28 @@
         vec3 mxRGB2 = max(mxRGB, max(max(nw, ne), max(sw, se)));
         mxRGB += mxRGB2;
 
-        // Safe divisors guaranteed strictly positive -> mathematically impossible to NaN!
         vec3 rcpMRGB = 1.0 / max(mxRGB, vec3(0.01));
         vec3 ampRGB = clamp(min(mnRGB, max(2.0 - mxRGB, vec3(0.0))) * rcpMRGB, vec3(0.0), vec3(1.0));
         ampRGB = sqrt(ampRGB);
 
-        // peak in [-0.192, -0.105] -> 1.0 + 4.0 * wRGB >= 0.23 ALWAYS!
-        float peak = -1.0 / mix(9.5, 5.2, clamp(casStrength, 0.0, 1.0));
+        float peak = -1.0 / mix(9.2, 5.0, clamp(casStrength, 0.0, 1.0));
         vec3 wRGB = ampRGB * peak;
         vec3 rcpWeightRGB = 1.0 / max(1.0 + 4.0 * wRGB, vec3(0.20));
         vec3 casColor = clamp(((n + w + e + s) * wRGB + result) * rcpWeightRGB, vec3(0.0), vec3(1.0));
         result = mix(result, casColor, clamp(casStrength, 0.0, 1.0));
       }
 
-      // 6. Dual-Scale 4K Micro-Detail Pop (brings out Blu-ray crispness in eyes, hair, textures)
+      // 6. Dual-Scale 4K Micro-Detail Recovery (crisp hair, eyes, fine textures)
       if (uSharpen > 0.01 || uEdgeEnhance > 0.01) {
-        vec2 mdx = vec2(uSrcTexelSize.x * 1.8, 0.0);
-        vec2 mdy = vec2(0.0, uSrcTexelSize.y * 1.8);
+        vec2 mdx = vec2(uSrcTexelSize.x * 1.75, 0.0);
+        vec2 mdy = vec2(0.0, uSrcTexelSize.y * 1.75);
         vec3 wideBlur = (
           tapCurr(vUv - mdx) + tapCurr(vUv + mdx) +
           tapCurr(vUv - mdy) + tapCurr(vUv + mdy) +
           n + s + w + e
         ) * 0.125;
-        vec3 microDetail = clamp(result - wideBlur, vec3(-0.24), vec3(0.24));
-        float detailGain = uSharpen * 0.62 + uEdgeEnhance * 0.52 + uUpscaleStrength * 0.30;
+        vec3 microDetail = clamp(result - wideBlur, vec3(-0.26), vec3(0.26));
+        float detailGain = uSharpen * 0.68 + uEdgeEnhance * 0.56 + uUpscaleStrength * 0.34;
         result = clamp(result + microDetail * detailGain, vec3(0.0), vec3(1.0));
       }
 
@@ -277,7 +319,6 @@
     }
   `;
 
-  // WebGL1 High-Precision Single-Pass Fallback (for older GPUs without WebGL2)
   const VERTEX_SHADER_GL1 = `
     attribute vec2 aPos;
     attribute vec2 aTexCoord;
@@ -325,13 +366,13 @@
       vec3 mn = min(c, min(min(n, s), min(w, e)));
       vec3 mx = max(c, max(max(n, s), max(w, e)));
       vec3 amp = sqrt(clamp(min(mn, max(1.0 - mx, vec3(0.0))) / max(mx, vec3(0.01)), vec3(0.0), vec3(1.0)));
-      float k = -1.0 / mix(9.5, 5.2, clamp(uSharpen + uUpscaleStrength * 0.4, 0.0, 1.0));
+      float k = -1.0 / mix(9.2, 5.0, clamp(uSharpen + uUpscaleStrength * 0.4, 0.0, 1.0));
       vec3 wRGB = amp * k;
       vec3 result = clamp(((n + s + w + e) * wRGB + c) / max(1.0 + 4.0 * wRGB, vec3(0.20)), vec3(0.0), vec3(1.0));
-      vec3 detail = clamp(result - (n + s + w + e) * 0.25, vec3(-0.22), vec3(0.22));
-      result += detail * (uSharpen * 0.9 + uEdgeEnhance * 0.65);
+      vec3 detail = clamp(result - (n + s + w + e) * 0.25, vec3(-0.24), vec3(0.24));
+      result += detail * (uSharpen * 0.95 + uEdgeEnhance * 0.65);
       if (uVibrance > 0.01) {
-        result = mix(vec3(luma(result)), result, 1.0 + uVibrance * 0.48);
+        result = mix(vec3(luma(result)), result, 1.0 + uVibrance * 0.50);
       }
       gl_FragColor = vec4(clamp(result, 0.0, 1.0), 1.0);
     }
@@ -362,6 +403,44 @@
     return prog;
   }
 
+  // Instant 9-point CPU pixel sanity check on raw decoded RGBA ImageData BEFORE WebGL upload!
+  // Rejects solid black, solid pink/magenta (broken OES YUV), solid green, or uniform blank frames.
+  function verifyCpuImageData(data, w, h) {
+    if (!data || w < 16 || h < 16) return "BLACK";
+    const xs = [0.20, 0.50, 0.80];
+    const ys = [0.20, 0.50, 0.80];
+    let nonBlack = 0;
+    let pinkCount = 0;
+    let greenCount = 0;
+    let minLuma = 255;
+    let maxLuma = 0;
+
+    for (let yi = 0; yi < 3; yi++) {
+      const py = Math.floor(h * ys[yi]);
+      for (let xi = 0; xi < 3; xi++) {
+        const px = Math.floor(w * xs[xi]);
+        const idx = (py * w + px) * 4;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        const y = (r * 54 + g * 183 + b * 19) >> 8;
+        if (y < minLuma) minLuma = y;
+        if (y > maxLuma) maxLuma = y;
+        if (r > 7 || g > 7 || b > 7) nonBlack++;
+        // Catch BOTH bright magenta (#FF00FF) AND pastel/washed pink (#FF80FF / #E060D0)
+        if (r > 145 && b > 125 && (r - g) > 55 && (b - g) > 40) pinkCount++;
+        // Catch broken YUV-zero green
+        if (g > 110 && r < 30 && b < 30) greenCount++;
+      }
+    }
+
+    if (pinkCount >= 3 || greenCount >= 5) return "BROKEN";
+    if (nonBlack === 0) return "BLACK";
+    // If all 9 points are identical pink/magenta, reject immediately
+    if ((maxLuma - minLuma) <= 2 && pinkCount >= 1) return "BROKEN";
+    return "OK";
+  }
+
   class AnimeWebGLPipeline {
     constructor(videoEl) {
       this.video = videoEl;
@@ -377,12 +456,16 @@
       this.canvas.style.objectFit = "contain";
       this.canvas.style.display = "none";
       this.canvas.style.opacity = "0";
+      this.canvas.style.background = "transparent";
 
-      // Offscreen 2D staging canvas: bypasses broken GeckoView MediaCodec OES->WebGL direct upload!
-      this.stagingCanvas = null;
-      this.stagingCtx = null;
-      // DIRECT -> CANVAS_2D_STAGING -> SAFE_CSS_GPU
-      this.uploadMode = "DIRECT";
+      // Software-backed 2D staging canvas (willReadFrequently: true bypasses broken Android OES blit!)
+      this.stagingCanvas = document.createElement("canvas");
+      this.stagingCtx = this.stagingCanvas.getContext("2d", {
+        alpha: false,
+        willReadFrequently: true
+      });
+      this.stageW = 0;
+      this.stageH = 0;
 
       this.isWebGL2 = false;
       this.gl = null;
@@ -397,18 +480,17 @@
       this.hasCurrFrame = false;
       this.hasPrevFrame = false;
       this.frameVerified = false;
-      this.needsHealthCheck = true;
-      this.lastHealthCheckTs = 0;
-      this.startupBlackCount = 0;
-      this.runtimeBlackCount = 0;
+      this.needsGlHealthCheck = true;
+      this.lastGlHealthCheckTs = 0;
+      this.badFrameStreak = 0;
       this.webglBrokenForVideo = false;
 
       this.gpuRenderer = "Unknown GPU";
       this.webGpuSupported = typeof navigator !== "undefined" && typeof navigator.gpu !== "undefined";
       this.maxTextureSize = 4096;
-      this.dynamicMaxDim = 3840; // Allows up to True 4K (3840x2160), auto-steps down if slow
+      this.dynamicMaxDim = 3840;
 
-      // IDLE | ACTIVE_WEBGL2 | ACTIVE_WEBGL1 | ACTIVE_CSS_GPU_FILTER | CORS_OR_DRM_PROTECTED | UNSUPPORTED
+      // IDLE | ACTIVE_WEBGL2 | ACTIVE_WEBGL1 | ACTIVE_CSS_GPU_FILTER | UNSUPPORTED
       this.status = "IDLE";
       this.active = false;
       this.destroyed = false;
@@ -419,8 +501,8 @@
       this.lastPresentedFrames = -1;
       this.lastMediaTime = -1;
       this.lastFallbackTime = -1;
-      this.lastFrameUploadTs = performance.now();
-      this.estimatedFrameIntervalMs = 41.67;
+      this.lastFrameUploadTs = 0;
+      this.estimatedFrameIntervalMs = 0; // Dynamically learned from real frames (NO forced 24fps assumption!)
       this.lastRenderTs = 0;
       this.needsConfigRedraw = false;
 
@@ -451,11 +533,10 @@
       };
       this.canvas.addEventListener("webglcontextlost", this._onContextLost, false);
 
-      // Reset temporal buffers on seek/pause/source-switch so Frame Gen NEVER ghosts or freezes
       this._onVideoSeeked = () => {
         this.hasPrevFrame = false;
         this.pendingNewVideoFrame = true;
-        this.needsHealthCheck = true;
+        this.needsGlHealthCheck = true;
       };
       this._onVideoPause = () => {
         this.hasPrevFrame = false;
@@ -466,9 +547,10 @@
         this.hasCurrFrame = false;
         this.hasPrevFrame = false;
         this.frameVerified = false;
-        this.needsHealthCheck = true;
-        this.startupBlackCount = 0;
-        this.runtimeBlackCount = 0;
+        this.needsGlHealthCheck = true;
+        this.badFrameStreak = 0;
+        this.estimatedFrameIntervalMs = 0;
+        this.lastFrameUploadTs = 0;
         this.outputFps = 0;
         this.canvas.style.opacity = "0";
       };
@@ -494,7 +576,7 @@
 
     _initContext() {
       const attrs = {
-        alpha: false,
+        alpha: true,
         antialias: false,
         depth: false,
         stencil: false,
@@ -508,7 +590,7 @@
         gl = this.canvas.getContext("webgl", attrs);
         this.isWebGL2 = false;
       }
-      if (!gl) {
+      if (!gl || !this.stagingCtx) {
         this.status = "UNSUPPORTED";
         return;
       }
@@ -524,7 +606,6 @@
       }
 
       try {
-        // Fullscreen quad (V=0 at top of video frame, V=1 at bottom)
         const vertices = new Float32Array([
           -1, -1, 0, 1,
            1, -1, 1, 1,
@@ -589,44 +670,32 @@
       gl.vertexAttribPointer(aTex, 2, gl.FLOAT, false, 16, 8);
     }
 
-    _ensureStagingCanvas(vw, vh) {
-      if (!this.stagingCanvas) {
-        this.stagingCanvas = document.createElement("canvas");
-        this.stagingCtx = this.stagingCanvas.getContext("2d", { alpha: false });
-      }
-      if (!this.stagingCtx) return false;
-      // Cap staging copy at 1920x1080 so 2D->WebGL upload stays blazing fast even for 60fps Frame Gen
+    // Captures verified CPU RGBA bytes from <video> via software 2D canvas.
+    // Bypasses Android GeckoView's broken MediaCodec SurfaceTexture -> WebGL2 OES path!
+    _captureVerifiedCpuFrame(video, vw, vh) {
+      // Keep CPU readback fast (~2-4ms) while WebGL2 GPU upscales cleanly to 1440p / 4K!
+      const maxStageW = this.config.frameGenEnabled ? 960 : 1280;
+      const maxStageH = this.config.frameGenEnabled ? 540 : 720;
       let sw = vw;
       let sh = vh;
-      if (sw > 1920 || sh > 1080) {
-        const down = Math.min(1920 / sw, 1080 / sh);
+      if (sw > maxStageW || sh > maxStageH) {
+        const down = Math.min(maxStageW / sw, maxStageH / sh);
         sw = Math.max(16, Math.round(sw * down));
         sh = Math.max(16, Math.round(sh * down));
       }
-      if (this.stagingCanvas.width !== sw || this.stagingCanvas.height !== sh) {
+      if (this.stageW !== sw || this.stageH !== sh) {
         this.stagingCanvas.width = sw;
         this.stagingCanvas.height = sh;
+        this.stageW = sw;
+        this.stageH = sh;
       }
-      return true;
+
+      this.stagingCtx.drawImage(video, 0, 0, sw, sh);
+      const imgData = this.stagingCtx.getImageData(0, 0, sw, sh);
+      const verdict = verifyCpuImageData(imgData.data, sw, sh);
+      return { verdict, data: imgData.data, width: sw, height: sh };
     }
 
-    _uploadFrameSource(gl, textureUnit, textureObj, video, vw, vh) {
-      gl.activeTexture(textureUnit);
-      gl.bindTexture(gl.TEXTURE_2D, textureObj);
-      if (this.uploadMode === "CANVAS_2D_STAGING") {
-        if (!this._ensureStagingCanvas(vw, vh)) {
-          return false;
-        }
-        this.stagingCtx.drawImage(video, 0, 0, this.stagingCanvas.width, this.stagingCanvas.height);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.stagingCanvas);
-      } else {
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
-      }
-      return gl.getError() === gl.NO_ERROR;
-    }
-
-    // Aligns canvas directly over <video> (z-index = videoZ + 1, pointer-events: none)
-    // so enhanced 4K video is ALWAYS visible ON TOP of <video>, while site controls stay ABOVE it!
     syncGeometry() {
       const video = this.video;
       const parent = video.parentElement;
@@ -642,7 +711,6 @@
       const safeCanvasZ = isNaN(vidZ) ? 1 : Math.max(1, vidZ + 1);
       this.canvas.style.zIndex = String(safeCanvasZ);
 
-      // Match <video>'s visual box relative to parent (ignoring transform which is applied identically to both!)
       if (video.offsetWidth > 10 && video.offsetHeight > 10) {
         this.canvas.style.left = `${video.offsetLeft}px`;
         this.canvas.style.top = `${video.offsetTop}px`;
@@ -669,20 +737,15 @@
       this.syncGeometry();
     }
 
-    // Clean, 100% WebRender-safe GPU filter fallback (NEVER SVG filter:url(#...) on <video>!)
+    // 100% WebRender-safe GPU clarity & cel-color enhancement directly on <video> (NEVER black/pink!)
     _applySafeCssGpuFallback() {
-      if (this.video.mediaKeys) {
-        this.status = "CORS_OR_DRM_PROTECTED";
-        this._clearCssGpuFallback();
-        return;
-      }
       if (!this.config.enabled) {
         this._clearCssGpuFallback();
         this.status = "IDLE";
         return;
       }
       const strength = Math.max(this.config.upscaleStrength, this.config.sharpen);
-      const contrast = (1.07 + strength * 0.16 + this.config.vibrance * 0.10).toFixed(3);
+      const contrast = (1.08 + strength * 0.16 + this.config.vibrance * 0.10).toFixed(3);
       const saturate = (1.08 + this.config.vibrance * 0.42 + this.config.edgeEnhance * 0.10).toFixed(3);
       const brightness = (1.01 + this.config.vibrance * 0.04).toFixed(3);
       this.video.style.setProperty(
@@ -697,30 +760,11 @@
       this.video.style.removeProperty("filter");
     }
 
-    // Escalate gracefully: DIRECT -> CANVAS_2D_STAGING -> SAFE_CSS_GPU (never leaves a black/pink screen!)
-    _handleRenderFailure(allowStagingFallback) {
-      if (allowStagingFallback && this.uploadMode === "DIRECT" && !this.video.mediaKeys) {
-        this.uploadMode = "CANVAS_2D_STAGING";
-        this.frameVerified = false;
-        this.needsHealthCheck = true;
-        this.startupBlackCount = 0;
-        this.runtimeBlackCount = 0;
-        this.hasCurrFrame = false;
-        this.hasPrevFrame = false;
-        this.pendingNewVideoFrame = true;
-        this.canvas.style.opacity = "0";
-        return;
-      }
-      this._fallbackToSafeCssFilter();
-    }
-
     _fallbackToSafeCssFilter() {
       this.webglBrokenForVideo = true;
       this.stop();
-      if (this.config.enabled && !this.video.mediaKeys) {
+      if (this.config.enabled) {
         this._applySafeCssGpuFallback();
-      } else if (this.video.mediaKeys) {
-        this.status = "CORS_OR_DRM_PROTECTED";
       } else {
         this.status = "IDLE";
       }
@@ -734,7 +778,7 @@
         this.hasPrevFrame = false;
       }
       this.needsConfigRedraw = true;
-      this.needsHealthCheck = true;
+      this.needsGlHealthCheck = true;
 
       const wantPipeline = this.config.enabled || this.config.frameGenEnabled;
       if (!wantPipeline) {
@@ -749,9 +793,7 @@
         return;
       }
 
-      if (this.status !== "CORS_OR_DRM_PROTECTED") {
-        this.start();
-      }
+      this.start();
     }
 
     _scheduleVideoFrameCallback() {
@@ -765,7 +807,7 @@
 
         const isNewFrame =
           (typeof metadata.presentedFrames === "number" && metadata.presentedFrames !== this.lastPresentedFrames) ||
-          (typeof metadata.mediaTime === "number" && Math.abs(metadata.mediaTime - this.lastMediaTime) > 0.003);
+          (typeof metadata.mediaTime === "number" && Math.abs(metadata.mediaTime - this.lastMediaTime) > 0.002);
 
         if (isNewFrame) {
           this.lastPresentedFrames = metadata.presentedFrames;
@@ -779,13 +821,8 @@
 
     start() {
       if (this.destroyed) return;
-      if (this.video.mediaKeys) {
-        this.status = "CORS_OR_DRM_PROTECTED";
-        this.stop();
-        return;
-      }
       const hasPrograms = this.isWebGL2 ? !!this.progGl2 : !!this.progGl1;
-      if (this.webglBrokenForVideo || !this.gl || !hasPrograms || this.gl.isContextLost()) {
+      if (this.webglBrokenForVideo || !this.gl || !hasPrograms || this.gl.isContextLost() || !this.stagingCtx) {
         this._applySafeCssGpuFallback();
         return;
       }
@@ -797,7 +834,7 @@
       this.status = this.isWebGL2 ? "ACTIVE_WEBGL2" : "ACTIVE_WEBGL1";
       this.pendingNewVideoFrame = true;
       this.needsConfigRedraw = true;
-      this.needsHealthCheck = true;
+      this.needsGlHealthCheck = true;
       this._scheduleVideoFrameCallback();
       if (!this.rafId) {
         this.rafId = requestAnimationFrame((ts) => this._tick(ts));
@@ -823,7 +860,7 @@
       }
     }
 
-    _verifyRenderedFrame(gl, w, h) {
+    _verifyWebGlOutput(gl, w, h) {
       if (w < 16 || h < 16) return "BLACK";
       const coords = [
         [Math.floor(w * 0.50), Math.floor(h * 0.50)],
@@ -833,31 +870,21 @@
         [Math.floor(w * 0.75), Math.floor(h * 0.75)]
       ];
       const px = new Uint8Array(4);
-      let nonBlackCount = 0;
-      let pinkMagentaCount = 0;
-      let solidGreenCount = 0;
-      let firstR = -1, firstG = -1, firstB = -1;
-      let allIdentical = true;
+      let nonBlack = 0;
+      let pinkCount = 0;
+      let greenCount = 0;
 
       for (let i = 0; i < coords.length; i++) {
         gl.readPixels(coords[i][0], coords[i][1], 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
         const r = px[0], g = px[1], b = px[2];
-        if (i === 0) {
-          firstR = r; firstG = g; firstB = b;
-        } else if (Math.abs(r - firstR) > 3 || Math.abs(g - firstG) > 3 || Math.abs(b - firstB) > 3) {
-          allIdentical = false;
-        }
-        if (r > 6 || g > 6 || b > 6) nonBlackCount++;
-        // Classic Mali/OES broken YUV-to-RGB magenta/pink detection
-        if (r > 170 && g < 75 && b > 145) pinkMagentaCount++;
-        // Classic broken YUV-0 green frame detection
-        if (r < 25 && g > 120 && b < 25) solidGreenCount++;
+        if (r > 6 || g > 6 || b > 6) nonBlack++;
+        if (r > 145 && b > 125 && (r - g) > 55 && (b - g) > 40) pinkCount++;
+        if (g > 110 && r < 30 && b < 30) greenCount++;
       }
 
       if (gl.getError() !== gl.NO_ERROR) return "BROKEN";
-      if (pinkMagentaCount >= 2 || solidGreenCount >= 4) return "BROKEN";
-      if (allIdentical && firstR > 150 && firstG < 85 && firstB > 130) return "BROKEN";
-      if (nonBlackCount === 0) return "BLACK";
+      if (pinkCount >= 2 || greenCount >= 4) return "BROKEN";
+      if (nonBlack === 0) return "BLACK";
       return "OK";
     }
 
@@ -867,16 +894,9 @@
 
       const video = this.video;
       if (video.readyState >= 2 && video.videoWidth > 16 && video.videoHeight > 16) {
-        if (video.mediaKeys) {
-          this.status = "CORS_OR_DRM_PROTECTED";
-          this.stop();
-          return;
-        }
-
         if (video.paused || video.ended) {
           this.outputFps = 0;
           this.outputFrames = 0;
-          // While paused, only redraw when user adjusts sliders / split compare!
           if (this.needsConfigRedraw && this.hasCurrFrame) {
             this.needsConfigRedraw = false;
             this._renderFrame(nowTs, false, false);
@@ -886,22 +906,26 @@
           }
         } else {
           if (typeof video.requestVideoFrameCallback !== "function") {
-            if (Math.abs(video.currentTime - this.lastFallbackTime) > 0.014) {
+            if (Math.abs(video.currentTime - this.lastFallbackTime) > 0.012) {
               this.lastFallbackTime = video.currentTime;
               this.pendingNewVideoFrame = true;
             }
           }
 
           const hasNewVideoFrame = this.pendingNewVideoFrame || !this.hasCurrFrame;
+          const targetFps = Math.max(30, Math.min(120, this.config.targetFps || 60));
+          const nativeFps = this.estimatedFrameIntervalMs > 4 ? (1000 / this.estimatedFrameIntervalMs) : 30;
+          // Only synthesize intermediate frames when targetFps is actually higher than the video's native FPS!
+          const needInterp = targetFps > (nativeFps + 4);
           const interpActive =
+            needInterp &&
             this.frameVerified &&
             this.isWebGL2 &&
             this.config.frameGenEnabled &&
             !this.interpAutoDisabled &&
             this.hasPrevFrame;
-          const targetFps = Math.max(30, Math.min(120, this.config.targetFps || 60));
-          const minRenderGapMs = interpActive ? (1000 / targetFps) : 0;
 
+          const minRenderGapMs = interpActive ? (1000 / targetFps) : 0;
           const shouldDrawInterp = interpActive && (nowTs - this.lastRenderTs) >= minRenderGapMs * 0.88;
           const shouldDrawConfig = this.needsConfigRedraw && this.hasCurrFrame;
 
@@ -935,8 +959,6 @@
         this.syncGeometry();
       }
 
-      // Compute True 2.5K / 4K Super-Resolution backing canvas size
-      // Cap at 2560x1440 when Frame Gen is ON so 60-120 FPS stays silky smooth on mobile GPUs!
       const scale = Math.max(0.75, Math.min(2.0, this.config.resolutionScale || 1.5));
       let targetW = Math.round(vw * scale);
       let targetH = Math.round(vh * scale);
@@ -953,11 +975,42 @@
       if (Math.abs(this.canvas.width - targetW) > 2 || Math.abs(this.canvas.height - targetH) > 2) {
         this.canvas.width = targetW;
         this.canvas.height = targetH;
-        this.needsHealthCheck = true;
+        this.needsGlHealthCheck = true;
       }
 
       try {
         if (hasNewVideoFrame) {
+          // 1. Capture and verify real CPU RGBA pixels BEFORE touching WebGL!
+          const frame = this._captureVerifiedCpuFrame(video, vw, vh);
+          if (frame.verdict === "BROKEN") {
+            this.canvas.style.opacity = "0";
+            this._fallbackToSafeCssFilter();
+            return;
+          }
+          if (frame.verdict === "BLACK") {
+            if (!this.frameVerified) {
+              this.canvas.style.opacity = "0";
+              if (!video.paused) {
+                this.badFrameStreak++;
+                if (this.badFrameStreak >= 5) {
+                  this._fallbackToSafeCssFilter();
+                }
+              }
+              return;
+            }
+            // During active playback, tolerate brief fade-to-black cuts (< 35 frames)
+            if (!video.paused && video.currentTime > 0.3) {
+              this.badFrameStreak++;
+              if (this.badFrameStreak >= 35) {
+                this.canvas.style.opacity = "0";
+                this._fallbackToSafeCssFilter();
+                return;
+              }
+            }
+          } else {
+            this.badFrameStreak = 0;
+          }
+
           while (gl.getError() !== gl.NO_ERROR) {}
 
           if (this.hasCurrFrame) {
@@ -965,30 +1018,51 @@
             this.texPrev = this.texCurr;
             this.texCurr = tmp;
             this.hasPrevFrame = true;
-            const deltaMs = nowTs - this.lastFrameUploadTs;
-            if (deltaMs >= 10 && deltaMs <= 120) {
-              this.estimatedFrameIntervalMs = this.estimatedFrameIntervalMs * 0.75 + deltaMs * 0.25;
+            if (this.lastFrameUploadTs > 0) {
+              const deltaMs = nowTs - this.lastFrameUploadTs;
+              if (deltaMs >= 7 && deltaMs <= 120) {
+                this.estimatedFrameIntervalMs = this.estimatedFrameIntervalMs === 0
+                  ? deltaMs
+                  : (this.estimatedFrameIntervalMs * 0.72 + deltaMs * 0.28);
+              }
             }
           }
           this.lastFrameUploadTs = nowTs;
 
-          const okCurr = this._uploadFrameSource(gl, gl.TEXTURE0, this.texCurr, video, vw, vh);
-          if (!okCurr) {
-            this._handleRenderFailure(true);
+          // Upload pure CPU Uint8ClampedArray -> ZERO OES/SurfaceTexture black/pink bug!
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, this.texCurr);
+          gl.texImage2D(
+            gl.TEXTURE_2D, 0, gl.RGBA,
+            frame.width, frame.height, 0,
+            gl.RGBA, gl.UNSIGNED_BYTE, frame.data
+          );
+
+          if (gl.getError() !== gl.NO_ERROR) {
+            this._fallbackToSafeCssFilter();
             return;
           }
 
           if (!this.hasCurrFrame) {
-            this._uploadFrameSource(gl, gl.TEXTURE1, this.texPrev, video, vw, vh);
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, this.texPrev);
+            gl.texImage2D(
+              gl.TEXTURE_2D, 0, gl.RGBA,
+              frame.width, frame.height, 0,
+              gl.RGBA, gl.UNSIGNED_BYTE, frame.data
+            );
           }
 
           this.hasCurrFrame = true;
         }
 
+        if (!this.hasCurrFrame || this.stageW < 16 || this.stageH < 16) return;
+
         const enhOn = this.config.enabled ? 1.0 : 0.0;
-        const elapsedSinceFrame = Math.max(0, nowTs - this.lastFrameUploadTs);
+        const elapsedSinceFrame = this.lastFrameUploadTs > 0 ? Math.max(0, nowTs - this.lastFrameUploadTs) : 0;
+        const intervalMs = this.estimatedFrameIntervalMs > 6 ? this.estimatedFrameIntervalMs : 33.33;
         const alpha = interpActive && this.hasPrevFrame
-          ? Math.max(0.0, Math.min(1.0, elapsedSinceFrame / Math.max(12.0, this.estimatedFrameIntervalMs)))
+          ? Math.max(0.0, Math.min(1.0, elapsedSinceFrame / intervalMs))
           : 1.0;
 
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1006,7 +1080,7 @@
           gl.bindTexture(gl.TEXTURE_2D, this.hasPrevFrame ? this.texPrev : this.texCurr);
           gl.uniform1i(this.u2.uTexPrev, 1);
 
-          gl.uniform2f(this.u2.uSrcTexelSize, 1.0 / vw, 1.0 / vh);
+          gl.uniform2f(this.u2.uSrcTexelSize, 1.0 / this.stageW, 1.0 / this.stageH);
           gl.uniform2f(this.u2.uOutTexelSize, 1.0 / targetW, 1.0 / targetH);
           gl.uniform1f(this.u2.uInterpEnabled, interpActive && this.hasPrevFrame ? 1.0 : 0.0);
           gl.uniform1f(this.u2.uAlpha, alpha);
@@ -1027,7 +1101,7 @@
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, this.texCurr);
           gl.uniform1i(this.uGl1.uTexCurr, 0);
-          gl.uniform2f(this.uGl1.uTexelSize, 1.0 / vw, 1.0 / vh);
+          gl.uniform2f(this.uGl1.uTexelSize, 1.0 / this.stageW, 1.0 / this.stageH);
           gl.uniform1f(this.uGl1.uUpscaleStrength, this.config.upscaleStrength * enhOn);
           gl.uniform1f(this.uGl1.uSharpen, this.config.sharpen * enhOn);
           gl.uniform1f(this.uGl1.uEdgeEnhance, this.config.edgeEnhance * enhOn);
@@ -1038,46 +1112,25 @@
           gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
         }
 
-        // Continuous Pixel Health Verification:
-        // Runs before showing canvas, after every resize/config change, AND every 1.2s during playback!
-        const shouldHealthCheck =
+        // Secondary WebGL Output Pixel Health Check before showing canvas (and every 1.2s)
+        const needGlCheck =
           !this.frameVerified ||
-          this.needsHealthCheck ||
-          (!video.paused && (nowTs - this.lastHealthCheckTs) >= 1200);
+          this.needsGlHealthCheck ||
+          (!video.paused && (nowTs - this.lastGlHealthCheckTs) >= 1200);
 
-        if (shouldHealthCheck) {
-          this.needsHealthCheck = false;
-          this.lastHealthCheckTs = nowTs;
-          const check = this._verifyRenderedFrame(gl, targetW, targetH);
-
-          if (check === "OK") {
+        if (needGlCheck) {
+          this.needsGlHealthCheck = false;
+          this.lastGlHealthCheckTs = nowTs;
+          const glCheck = this._verifyWebGlOutput(gl, targetW, targetH);
+          if (glCheck === "OK") {
             this.frameVerified = true;
-            this.startupBlackCount = 0;
-            this.runtimeBlackCount = 0;
             this.canvas.style.opacity = "1";
-          } else if (check === "BROKEN") {
+          } else if (glCheck === "BROKEN") {
             this.canvas.style.opacity = "0";
-            this._handleRenderFailure(true);
+            this._fallbackToSafeCssFilter();
             return;
-          } else if (check === "BLACK") {
-            if (!this.frameVerified) {
-              this.canvas.style.opacity = "0";
-              if (hasNewVideoFrame && !video.paused) {
-                this.startupBlackCount++;
-                if (this.startupBlackCount >= 6) {
-                  this._handleRenderFailure(true);
-                  return;
-                }
-              }
-            } else if (!video.paused && video.currentTime > 0.25) {
-              this.runtimeBlackCount++;
-              // 3 consecutive black checks (~3.6s) during active playback -> broken texture blit, escalate!
-              if (this.runtimeBlackCount >= 3) {
-                this.canvas.style.opacity = "0";
-                this._handleRenderFailure(true);
-                return;
-              }
-            }
+          } else if (!this.frameVerified) {
+            this.canvas.style.opacity = "0";
           }
         } else if (this.frameVerified && this.canvas.style.opacity !== "1") {
           this.canvas.style.opacity = "1";
@@ -1085,7 +1138,7 @@
 
         this.lastRenderTs = nowTs;
 
-        // Smart adaptive GPU performance safeguard (steps down 4K -> 1440p -> 1080p if slow)
+        // Smart adaptive GPU performance safeguard
         const dt = performance.now() - t0;
         if (dt > 24) {
           this.slowFrameCount++;
@@ -1103,7 +1156,6 @@
           this.slowFrameCount = Math.max(0, this.slowFrameCount - 1);
         }
 
-        // Accurate real-time Output FPS measurement (500ms sliding window)
         if (!video.paused && !video.ended) {
           this.outputFrames++;
           const fpsElapsed = nowTs - this.lastOutputFpsTs;
@@ -1117,9 +1169,8 @@
           }
         }
       } catch (_) {
-        // SecurityError (CORS-tainted video) or WebGL error -> clean immediate fallback
-        const canRetryStaging = this.uploadMode === "DIRECT" && !this.video.mediaKeys;
-        this._handleRenderFailure(canRetryStaging);
+        // Cross-origin SecurityError on getImageData or WebGL fault -> instant safe GPU fallback, ZERO black screen!
+        this._fallbackToSafeCssFilter();
       }
     }
 
@@ -1128,7 +1179,7 @@
       this.canvas.style.setProperty("transform", transformCss, "important");
       this.canvas.style.setProperty("transform-origin", "center center", "important");
       this.syncGeometry();
-      this.needsHealthCheck = true;
+      this.needsGlHealthCheck = true;
     }
 
     destroy() {

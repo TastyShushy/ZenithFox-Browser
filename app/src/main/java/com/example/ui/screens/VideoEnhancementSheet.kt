@@ -206,13 +206,13 @@ fun VideoEnhancementSheet(
             }
             if (telemetry.enhancementStatus == "ACTIVE_CSS_GPU_FILTER" || telemetry.enhancementStatus == "ACTIVE_SVG_GPU_FILTER") {
               Text(
-                text = "This video host restricts raw WebGL2 pixel readback, so ZenithFox switched to Safe Mode GPU Color & Clarity (zero black/pink screen risk).",
+                text = "This video host restricts cross-origin pixel readback, so ZenithFox switched to Safe Mode GPU Clarity & Color (zero black/pink screen risk).",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
               )
             } else if (telemetry.enhancementStatus == "CORS_OR_DRM_PROTECTED") {
               Text(
-                text = "This video stream is DRM-encrypted (EME). Browser security blocks GPU pixel sampling; hardware decode and geometric screen scaling remain active.",
+                text = "Raw pixel sampling is blocked by this stream host; native hardware playback and crisp geometric scaling remain active.",
                 style = MaterialTheme.typography.bodySmall,
                 color = StatusWarning
               )
@@ -352,9 +352,9 @@ fun VideoEnhancementSheet(
           !config.frameGenEnabled -> "Off (Native ${if (telemetry.sourceFps > 0) "${telemetry.sourceFps} FPS" else "source cadence"})"
           telemetry.frameGenAutoDisabled -> "Auto-Paused (GPU frame time >24 ms thermal guard)"
           telemetry.frameGenActive -> "Active: Optical-Flow MCFI → Target ${config.targetFps} FPS"
-          telemetry.enhancementStatus == "ACTIVE_CSS_GPU_FILTER" || telemetry.enhancementStatus == "ACTIVE_SVG_GPU_FILTER" -> "Standby (Stream uses Safe Mode to prevent black/pink screens)"
-          telemetry.enhancementStatus == "CORS_OR_DRM_PROTECTED" -> "Unavailable on DRM-encrypted streams"
-          else -> "Armed for ${config.targetFps} FPS (starts when verified WebGL2 video plays)"
+          telemetry.enhancementStatus == "ACTIVE_CSS_GPU_FILTER" || telemetry.enhancementStatus == "ACTIVE_SVG_GPU_FILTER" -> "Standby (Stream uses Safe Mode GPU Clarity)"
+          telemetry.enhancementStatus == "CORS_OR_DRM_PROTECTED" -> "Standby (Cross-origin pixel sampling blocked by host)"
+          else -> "Armed for ${config.targetFps} FPS (activates when WebGL2 upscaling runs)"
         }
         val frameGenStatusColor = when {
           telemetry.frameGenActive -> StatusSuccess

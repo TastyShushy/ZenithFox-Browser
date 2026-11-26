@@ -75,7 +75,7 @@ class AnimeBrowserCoreLogicTest {
 
     assertTrue(webgl2.isShaderActive)
     assertEquals("1920×1080", webgl2.resolutionLabel)
-    assertEquals("WebGL2 Anime4K + Optical-Flow Active", webgl2.statusHumanLabel)
+    assertEquals("4K WebGL2 + Optical-Flow Active", webgl2.statusHumanLabel)
 
     val cssSafeFallback = VideoTelemetry(
       hasVideo = true,
@@ -86,15 +86,15 @@ class AnimeBrowserCoreLogicTest {
       enhancementStatus = "ACTIVE_CSS_GPU_FILTER"
     )
     assertTrue(cssSafeFallback.isShaderActive)
-    assertEquals("WebRender GPU Color & Clarity (Safe Mode)", cssSafeFallback.statusHumanLabel)
+    assertEquals("GPU Clarity & Color Boost Active", cssSafeFallback.statusHumanLabel)
     assertEquals(com.example.data.model.AccentPalette.ZENITH_VIOLET, com.example.data.model.BrowserSettings().accentPalette)
 
     assertTrue(svgFallback.isShaderActive)
-    assertEquals("WebRender GPU Sharpen (Cross-Origin)", svgFallback.statusHumanLabel)
+    assertEquals("GPU Clarity Active", svgFallback.statusHumanLabel)
 
     assertFalse(corsProtected.isShaderActive)
     assertEquals("1280×720", corsProtected.resolutionLabel)
-    assertTrue(corsProtected.statusHumanLabel.contains("CSS Scaling Only"))
+    assertEquals("Native Hardware Decode", corsProtected.statusHumanLabel)
 
     val frameGenCfg = EnhancementConfig.forPreset(
       preset = EnhancementPreset.HIGH_QUALITY,
@@ -104,6 +104,23 @@ class AnimeBrowserCoreLogicTest {
     assertTrue(frameGenCfg.enabled)
     assertTrue(frameGenCfg.frameGenEnabled)
     assertEquals(90, frameGenCfg.targetFps)
+  }
+
+  @Test
+  fun appUpdateManagerNormalizesRepoAndComparesSemanticVersions() {
+    assertEquals(
+      "user/ZenithFox-Browser",
+      com.example.updater.AppUpdateManager.normalizeRepoSlug("https://github.com/user/ZenithFox-Browser.git")
+    )
+    assertEquals(
+      "user/ZenithFox-Browser",
+      com.example.updater.AppUpdateManager.normalizeRepoSlug("user/ZenithFox-Browser/")
+    )
+    assertEquals("", com.example.updater.AppUpdateManager.normalizeRepoSlug("invalid"))
+    assertTrue(com.example.updater.AppUpdateManager.isNewerVersion("v2.0.0", "1.7.0"))
+    assertTrue(com.example.updater.AppUpdateManager.isNewerVersion("1.7.1", "1.7.0"))
+    assertFalse(com.example.updater.AppUpdateManager.isNewerVersion("v1.7.0", "1.7.0"))
+    assertFalse(com.example.updater.AppUpdateManager.isNewerVersion("v1.6.9", "1.7.0"))
   }
 
   @Test

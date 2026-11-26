@@ -52,6 +52,10 @@ class BrowserPreferencesRepository(private val context: Context) {
     val POPUP_BLOCK_ENABLED = booleanPreferencesKey("popup_block_enabled")
     val TRACKER_BLOCK_ENABLED = booleanPreferencesKey("tracker_block_enabled")
     val DOWNLOAD_SUBFOLDER = stringPreferencesKey("download_subfolder")
+    val AUTO_PIP_ON_MINIMIZE = booleanPreferencesKey("auto_pip_on_minimize")
+    val AUTO_CHECK_UPDATES = booleanPreferencesKey("auto_check_updates")
+    val UPDATE_REPO_SLUG = stringPreferencesKey("update_repo_slug")
+    val SKIPPED_UPDATE_VERSION = stringPreferencesKey("skipped_update_version")
   }
 
   val settingsFlow: Flow<BrowserSettings> = context.browserPrefsDataStore.data.map { prefs ->
@@ -80,7 +84,11 @@ class BrowserPreferencesRepository(private val context: Context) {
       adBlockEnabled = prefs[Keys.ADBLOCK_ENABLED] ?: true,
       popupBlockEnabled = prefs[Keys.POPUP_BLOCK_ENABLED] ?: true,
       trackerBlockEnabled = prefs[Keys.TRACKER_BLOCK_ENABLED] ?: true,
-      downloadSubfolder = prefs[Keys.DOWNLOAD_SUBFOLDER] ?: "ZenithFox"
+      downloadSubfolder = prefs[Keys.DOWNLOAD_SUBFOLDER] ?: "ZenithFox",
+      autoPipOnMinimize = prefs[Keys.AUTO_PIP_ON_MINIMIZE] ?: true,
+      autoCheckUpdates = prefs[Keys.AUTO_CHECK_UPDATES] ?: true,
+      updateRepoSlug = prefs[Keys.UPDATE_REPO_SLUG] ?: "",
+      skippedUpdateVersion = prefs[Keys.SKIPPED_UPDATE_VERSION] ?: ""
     )
   }
 
@@ -111,7 +119,11 @@ class BrowserPreferencesRepository(private val context: Context) {
         adBlockEnabled = prefs[Keys.ADBLOCK_ENABLED] ?: true,
         popupBlockEnabled = prefs[Keys.POPUP_BLOCK_ENABLED] ?: true,
         trackerBlockEnabled = prefs[Keys.TRACKER_BLOCK_ENABLED] ?: true,
-        downloadSubfolder = prefs[Keys.DOWNLOAD_SUBFOLDER] ?: "ZenithFox"
+        downloadSubfolder = prefs[Keys.DOWNLOAD_SUBFOLDER] ?: "ZenithFox",
+        autoPipOnMinimize = prefs[Keys.AUTO_PIP_ON_MINIMIZE] ?: true,
+        autoCheckUpdates = prefs[Keys.AUTO_CHECK_UPDATES] ?: true,
+        updateRepoSlug = prefs[Keys.UPDATE_REPO_SLUG] ?: "",
+        skippedUpdateVersion = prefs[Keys.SKIPPED_UPDATE_VERSION] ?: ""
       )
       val next = transform(current)
       prefs[Keys.THEME_MODE] = next.themeMode.name
@@ -139,6 +151,10 @@ class BrowserPreferencesRepository(private val context: Context) {
       prefs[Keys.POPUP_BLOCK_ENABLED] = next.popupBlockEnabled
       prefs[Keys.TRACKER_BLOCK_ENABLED] = next.trackerBlockEnabled
       prefs[Keys.DOWNLOAD_SUBFOLDER] = next.downloadSubfolder
+      prefs[Keys.AUTO_PIP_ON_MINIMIZE] = next.autoPipOnMinimize
+      prefs[Keys.AUTO_CHECK_UPDATES] = next.autoCheckUpdates
+      prefs[Keys.UPDATE_REPO_SLUG] = next.updateRepoSlug
+      prefs[Keys.SKIPPED_UPDATE_VERSION] = next.skippedUpdateVersion
     }
   }
 }

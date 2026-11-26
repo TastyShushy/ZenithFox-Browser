@@ -23,6 +23,9 @@ import com.example.data.model.PerformanceStats
 import com.example.data.model.VideoScalingMode
 import com.example.engine.GeckoEngineManager
 import com.example.engine.UrlUtils
+import com.example.updater.AppReleaseInfo
+import com.example.updater.AppUpdateManager
+import com.example.updater.UpdateDownloadState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -112,7 +115,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     list.find { it.id == id } ?: list.firstOrNull()
   }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
-  private val _enhancementConfig = MutableStateFlow(EnhancementConfig.forPreset(EnhancementPreset.BALANCED))
+  private val _enhancementConfig = MutableStateFlow(EnhancementConfig.forPreset(EnhancementPreset.OFF))
   val enhancementConfig: StateFlow<EnhancementConfig> = _enhancementConfig.asStateFlow()
 
   private val _scalingMode = MutableStateFlow(VideoScalingMode.FIT)
@@ -145,8 +148,18 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
   private val _pendingAndroidPermission = MutableStateFlow<PendingAndroidPermission?>(null)
   val pendingAndroidPermission: StateFlow<PendingAndroidPermission?> = _pendingAndroidPermission.asStateFlow()
 
+  private val _availableUpdate = MutableStateFlow<AppReleaseInfo?>(null)
+  val availableUpdate: StateFlow<AppReleaseInfo?> = _availableUpdate.asStateFlow()
+
+  private val _updateDownloadState = MutableStateFlow<UpdateDownloadState>(UpdateDownloadState.Idle)
+  val updateDownloadState: StateFlow<UpdateDownloadState> = _updateDownloadState.asStateFlow()
+
+  private val _isCheckingForUpdate = MutableStateFlow(false)
+  val isCheckingForUpdate: StateFlow<Boolean> = _isCheckingForUpdate.asStateFlow()
+
   private var suggestionJob: Job? = null
   private var lastRecordedVideoUrl: String = ""
+  private var startupUpdateCheckDone = false
 
   private val sessionListener = object : GeckoEngineManager.SessionEventListener {
     override fun onLocationChanged(tabId: String, url: String) {
@@ -267,6 +280,19 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     observeDetectedStreamsForAutoInspect()
     observeSavedHtml()
     startPerformanceStatsLoop()
+    scheduleStartupUpdateCheck()
+  }
+
+  private fun scheduleStartupUpdateCheck() {
+    viewModelScope.launch {
+      delay(2500L)
+      if (startupUpdateCheckDone) return@launch
+      val s = settings.value
+      if (s.autoCheckUpdates && s.updateRepoSlug.isNotBlank()) {
+        startupUpdateCheckDone = true
+        checkForUpdates(manual = false)
+      }
+    }
   }
 
   private fun initializeTabs() {
@@ -954,6 +980,121 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     if (url.startsWith("http://") || url.startsWith("https://")) {
       navigateActiveTab(url)
     }
+  }
+
+  // --- App Lifecycle & PiP Surface Recovery (prevents black screen on minimize/resume!) ---
+  fun onAppForegrounded() {
+    val current = activeTab.value ?: return
+    if (!current.isHomePage) {
+      geckoEngine.reactivateSession(current.id)
+    }
+  }
+
+  fun onAppBackgrounded(inPip: Boolean) {
+    if (inPip) return
+    val current = activeTab.value ?: return
+    if (!current.isHomePage) {
+      // Gently pause non-PiP background audio without tearing down the active session
+      geckoEngine.sendVideoControl("PAUSE")
+    }
+  }
+
+  // --- Video Player Essential Quick Controls ---
+  fun toggleVideoPlayPause() {
+    geckoEngine.sendVideoControl("TOGGLE_PLAY")
+  }
+
+  fun seekVideoBy(seconds: Double) {
+    geckoEngine.sendVideoControl("SEEK_BY", seconds = seconds)
+  }
+
+  fun setVideoPlaybackSpeed(speed: Float) {
+    geckoEngine.sendVideoControl("SET_SPEED", speed = speed)
+  }
+
+  fun toggleVideoMute() {
+    geckoEngine.sendVideoControl("TOGGLE_MUTE")
+  }
+
+  fun toggleVideoSubtitles() {
+    geckoEngine.sendVideoControl("TOGGLE_SUBTITLES")
+  }
+
+  // --- Built-In GitHub Releases APK Auto-Updater ---
+  fun checkForUpdates(manual: Boolean = false) {
+    if (_isCheckingForUpdate.value) return
+    val s = settings.value
+    val slug = AppUpdateManager.normalizeRepoSlug(s.updateRepoSlug)
+    if (slug.isBlank()) {
+      if (manual) {
+        _statusMessage.value = "Enter your GitHub repo (owner/repo) in Settings → App Updates first"
+      }
+      return
+    }
+    viewModelScope.launch {
+      _isCheckingForUpdate.value = true
+      val result = AppUpdateManager.checkLatestRelease(slug)
+      _isCheckingForUpdate.value = false
+      result.onSuccess { release ->
+        if (release == null) {
+          if (manual) _statusMessage.value = "No published GitHub releases found for $slug"
+          return@onSuccess
+        }
+        val isNewer = AppUpdateManager.isNewerVersion(release.versionTag)
+        val isSkipped = !manual && s.skippedUpdateVersion.equals(release.versionTag, ignoreCase = true)
+        if (isNewer && !isSkipped) {
+          _updateDownloadState.value = UpdateDownloadState.Idle
+          _availableUpdate.value = release
+        } else if (manual) {
+          _statusMessage.value = "You are on the latest version (v${com.example.BuildConfig.VERSION_NAME})"
+        }
+      }.onFailure { err ->
+        if (manual) {
+          _statusMessage.value = err.message ?: "Could not check GitHub for updates"
+        }
+      }
+    }
+  }
+
+  fun installAvailableUpdate() {
+    val release = _availableUpdate.value ?: return
+    val existing = (_updateDownloadState.value as? UpdateDownloadState.ReadyToInstall)?.apkFile
+    if (existing != null && existing.exists()) {
+      val launched = AppUpdateManager.launchApkInstaller(app, existing)
+      if (!launched) {
+        _statusMessage.value = "Allow 'Install unknown apps' for ZenithFox Browser, then tap Install Update again"
+      }
+      return
+    }
+
+    viewModelScope.launch {
+      _updateDownloadState.value = UpdateDownloadState.Downloading(0, 0L, release.apkSizeBytes)
+      val dlResult = AppUpdateManager.downloadApk(app, release) { pct, downloaded, total ->
+        _updateDownloadState.value = UpdateDownloadState.Downloading(pct, downloaded, total)
+      }
+      dlResult.onSuccess { apkFile ->
+        _updateDownloadState.value = UpdateDownloadState.ReadyToInstall(apkFile)
+        val launched = AppUpdateManager.launchApkInstaller(app, apkFile)
+        if (!launched) {
+          _statusMessage.value = "Allow 'Install unknown apps' for ZenithFox Browser, then tap Install Update again"
+        }
+      }.onFailure { err ->
+        _updateDownloadState.value = UpdateDownloadState.Error(err.message ?: "Update download failed")
+      }
+    }
+  }
+
+  fun skipAvailableUpdate() {
+    val tag = _availableUpdate.value?.versionTag ?: return
+    _availableUpdate.value = null
+    _updateDownloadState.value = UpdateDownloadState.Idle
+    updateSettings { it.copy(skippedUpdateVersion = tag) }
+    _statusMessage.value = "Skipped update $tag"
+  }
+
+  fun ignoreAvailableUpdate() {
+    _availableUpdate.value = null
+    _updateDownloadState.value = UpdateDownloadState.Idle
   }
 
   private fun applySavedSitePreferences(url: String) {
