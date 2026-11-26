@@ -96,8 +96,9 @@ class AnimeBrowserUnitTests {
 
     assertTrue(active.isShaderActive)
     assertEquals("1920×1080", active.resolutionLabel)
+    assertEquals("4K WebGL2 Shader Active", active.statusHumanLabel)
     assertFalse(corsBlocked.isShaderActive)
-    assertTrue(corsBlocked.statusHumanLabel.contains("CORS/DRM"))
+    assertEquals("Native Hardware Decode", corsBlocked.statusHumanLabel)
   }
 
   @Test
