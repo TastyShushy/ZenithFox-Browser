@@ -1,0 +1,6 @@
+{
+  "name": "ZenithFox Browser",
+  "description": "ZenithFox Browser is a native Android browser powered by Mozilla GeckoView featuring real-time Anime4K WebGL2 video enhancement, GPU optical-flow frame generation, adaptive video scaling, video-only downloading, built-in WebExtensions, and ad/tracker blocking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,28 @@
+{
+  "manifest_version": 2,
+  "name": "Anime Video Downloader",
+  "version": "1.0.0",
+  "description": "Clean-room GeckoView WebExtension equivalent of MAX Video Downloader: sniffs HLS (.m3u8), MP4, WebM, and subtitle tracks with streaming CDN headers for native Android downloading.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "anime-downloader@animebrowser.app"
+    }
+  },
+  "permissions": [
+    "geckoViewAddons",
+    "nativeMessaging",
+    "webRequest",
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}

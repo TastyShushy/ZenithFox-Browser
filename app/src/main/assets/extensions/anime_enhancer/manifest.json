@@ -1,0 +1,31 @@
+{
+  "manifest_version": 2,
+  "name": "Anime4K WebGL2 Enhancer & Video Controller",
+  "version": "1.1.0",
+  "description": "Clean-room WebGL2 Anime4K shader pipeline, GPU optical-flow frame generation, true screen-stretch scaling, and force fullscreen for Anime Browser.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "anime-enhancer@animebrowser.app",
+      "strict_min_version": "109.0"
+    }
+  },
+  "permissions": [
+    "geckoViewAddons",
+    "nativeMessaging",
+    "webRequest",
+    "webRequestBlocking",
+    "tabs",
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "all_frames": true,
+      "run_at": "document_start",
+      "js": ["anime4k_shaders.js", "content.js"]
+    }
+  ]
+}

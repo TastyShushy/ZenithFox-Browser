@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">ZenithFox Browser</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_back">Back</string>
+    <string name="nav_forward">Forward</string>
+    <string name="nav_tabs">Tabs</string>
+    <string name="nav_menu">Menu</string>
+    <string name="search_hint">Search Google or type URL</string>
+    <string name="private_mode_label">Private Mode</string>
+    <string name="video_enhancer_title">Anime4K WebGL2 Enhancer</string>
+    <string name="video_scaling_title">Video Scaling &amp; Fullscreen</string>
+    <string name="downloads_title">Downloads</string>
+    <string name="bookmarks_title">Bookmarks</string>
+    <string name="history_title">History</string>
+    <string name="extensions_title">Extension Manager</string>
+    <string name="privacy_title">Privacy &amp; Ad Shield</string>
+    <string name="settings_title">Browser Settings</string>
+    <string name="site_permissions_title">Site Permissions</string>
+</resources>
