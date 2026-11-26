@@ -206,7 +206,7 @@ fun VideoEnhancementSheet(
             }
             if (telemetry.enhancementStatus == "ACTIVE_CSS_GPU_FILTER" || telemetry.enhancementStatus == "ACTIVE_SVG_GPU_FILTER") {
               Text(
-                text = "This video host restricts cross-origin pixel readback, so ZenithFox switched to Safe Mode GPU Clarity & Color (zero black/pink screen risk).",
+                text = "This video host restricts cross-origin pixel readback, so ZenithFox switched to Safe Mode GPU Clarity (original colors preserved, zero black/pink screen risk).",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
               )
@@ -329,12 +329,6 @@ fun VideoEnhancementSheet(
             value = config.edgeEnhance,
             valueLabel = "${(config.edgeEnhance * 100).roundToInt()}%",
             onValueChange = { v -> onUpdateCustom { it.copy(edgeEnhance = v) } }
-          )
-          ShaderSliderRow(
-            label = "Anime Color Correction & Vibrance",
-            value = config.vibrance,
-            valueLabel = "${(config.vibrance * 100).roundToInt()}%",
-            onValueChange = { v -> onUpdateCustom { it.copy(vibrance = v) } }
           )
           ShaderSliderRow(
             label = "Shader Processing Resolution",

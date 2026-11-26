@@ -86,7 +86,7 @@ class AnimeBrowserCoreLogicTest {
       enhancementStatus = "ACTIVE_CSS_GPU_FILTER"
     )
     assertTrue(cssSafeFallback.isShaderActive)
-    assertEquals("GPU Clarity & Color Boost Active", cssSafeFallback.statusHumanLabel)
+    assertEquals("GPU Clarity Boost Active", cssSafeFallback.statusHumanLabel)
     assertEquals(com.example.data.model.AccentPalette.ZENITH_VIOLET, com.example.data.model.BrowserSettings().accentPalette)
 
     assertTrue(svgFallback.isShaderActive)

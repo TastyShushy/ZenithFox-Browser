@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.animebrowser.k7v9xm"
     minSdk = 24
     targetSdk = 36
-    versionCode = 8
-    versionName = "1.7.0"
+    versionCode = 9
+    versionName = "1.7.1"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

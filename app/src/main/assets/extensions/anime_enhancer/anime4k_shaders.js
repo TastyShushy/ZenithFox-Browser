@@ -173,7 +173,7 @@
         : rawCurr;
       vec3 c = sampleMotionBase(vUv, crispBase);
 
-      float anyEnhance = uUpscaleStrength + uSharpen + uDeband + uDenoise + uEdgeEnhance + uVibrance;
+      float anyEnhance = uUpscaleStrength + uSharpen + uDeband + uDenoise + uEdgeEnhance;
       if (anyEnhance < 0.01) {
         fragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
         return;
@@ -300,21 +300,7 @@
         result = clamp(result + microDetail * detailGain, vec3(0.0), vec3(1.0));
       }
 
-      // 7. Luma-Preserving HDR Cel Micro-Contrast & Selective Saturation Pop
-      if (uVibrance > 0.01) {
-        float y = luma(result);
-        float sY = y * y * (3.0 - 2.0 * y);
-        float targetY = mix(y, sY, uVibrance * 0.36);
-        result *= clamp(targetY / max(y, 0.002), 0.75, 1.35);
-        result = clamp(result, vec3(0.0), vec3(1.0));
-
-        float mx = max(result.r, max(result.g, result.b));
-        float mn = min(result.r, min(result.g, result.b));
-        float sat = (mx - mn) / max(mx, 0.002);
-        float vibBoost = 1.0 + uVibrance * 0.58 * (1.0 - sat * 0.55);
-        result = mix(vec3(luma(result)), result, vibBoost);
-      }
-
+      // Original video colors preserved faithfully (zero color grading / saturation shift)
       fragColor = vec4(clamp(result, 0.0, 1.0), 1.0);
     }
   `;
@@ -371,9 +357,7 @@
       vec3 result = clamp(((n + s + w + e) * wRGB + c) / max(1.0 + 4.0 * wRGB, vec3(0.20)), vec3(0.0), vec3(1.0));
       vec3 detail = clamp(result - (n + s + w + e) * 0.25, vec3(-0.24), vec3(0.24));
       result += detail * (uSharpen * 0.95 + uEdgeEnhance * 0.65);
-      if (uVibrance > 0.01) {
-        result = mix(vec3(luma(result)), result, 1.0 + uVibrance * 0.50);
-      }
+      // Original video colors preserved faithfully (zero color grading)
       gl_FragColor = vec4(clamp(result, 0.0, 1.0), 1.0);
     }
   `;
@@ -737,7 +721,7 @@
       this.syncGeometry();
     }
 
-    // 100% WebRender-safe GPU clarity & cel-color enhancement directly on <video> (NEVER black/pink!)
+    // 100% WebRender-safe GPU clarity directly on <video> (zero color grading, NEVER black/pink!)
     _applySafeCssGpuFallback() {
       if (!this.config.enabled) {
         this._clearCssGpuFallback();
@@ -745,12 +729,10 @@
         return;
       }
       const strength = Math.max(this.config.upscaleStrength, this.config.sharpen);
-      const contrast = (1.08 + strength * 0.16 + this.config.vibrance * 0.10).toFixed(3);
-      const saturate = (1.08 + this.config.vibrance * 0.42 + this.config.edgeEnhance * 0.10).toFixed(3);
-      const brightness = (1.01 + this.config.vibrance * 0.04).toFixed(3);
+      const contrast = (1.03 + strength * 0.09).toFixed(3);
       this.video.style.setProperty(
         "filter",
-        `contrast(${contrast}) saturate(${saturate}) brightness(${brightness})`,
+        `contrast(${contrast})`,
         "important"
       );
       this.status = "ACTIVE_CSS_GPU_FILTER";

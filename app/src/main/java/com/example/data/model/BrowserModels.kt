@@ -50,7 +50,7 @@ enum class EnhancementPreset(val label: String, val description: String) {
   OFF("Off", "Native hardware video decode only (zero shader overhead)"),
   PERFORMANCE("1080p Crisp", "Fast FidelityFX CAS sharpening & clean ink-line reconstruction (1.0x)"),
   BALANCED("1440p Anime4K", "Catmull-Rom super-res + Anime4K line thinning + CAS crispness (1.25x)"),
-  HIGH_QUALITY("2.5K Ultra Crisp", "Deep Anime4K ink darkening + strong FidelityFX CAS + HDR cel pop (1.5x)"),
+  HIGH_QUALITY("2.5K Ultra Crisp", "Deep Anime4K ink darkening + strong FidelityFX CAS with natural colors (1.5x)"),
   ULTRA_QUALITY("4K Super-Res", "Maximum FP32 4K Anime4K + Dual-Scale FidelityFX CAS up to 3840×2160 (2.0x)"),
   CUSTOM("Custom", "User-tuned 4K shader parameters")
 }
@@ -63,7 +63,7 @@ data class EnhancementConfig(
   val deband: Float = 0.45f,
   val denoise: Float = 0.30f,
   val edgeEnhance: Float = 0.78f,
-  val vibrance: Float = 0.32f,
+  val vibrance: Float = 0f,
   val resolutionScale: Float = 1.5f,
   val frameGenEnabled: Boolean = false,
   val targetFps: Int = 60,
@@ -88,33 +88,34 @@ data class EnhancementConfig(
       EnhancementPreset.PERFORMANCE -> EnhancementConfig(
         enabled = true, preset = preset,
         upscaleStrength = 0.55f, sharpen = 0.58f, deband = 0.20f, denoise = 0.15f,
-        edgeEnhance = 0.55f, vibrance = 0.22f, resolutionScale = 1.0f,
+        edgeEnhance = 0.55f, vibrance = 0f, resolutionScale = 1.0f,
         frameGenEnabled = frameGenEnabled, targetFps = targetFps,
         splitCompare = splitCompare, splitPosition = splitPosition
       )
       EnhancementPreset.BALANCED -> EnhancementConfig(
         enabled = true, preset = preset,
         upscaleStrength = 0.72f, sharpen = 0.70f, deband = 0.38f, denoise = 0.25f,
-        edgeEnhance = 0.68f, vibrance = 0.28f, resolutionScale = 1.25f,
+        edgeEnhance = 0.68f, vibrance = 0f, resolutionScale = 1.25f,
         frameGenEnabled = frameGenEnabled, targetFps = targetFps,
         splitCompare = splitCompare, splitPosition = splitPosition
       )
       EnhancementPreset.HIGH_QUALITY -> EnhancementConfig(
         enabled = true, preset = preset,
         upscaleStrength = 0.86f, sharpen = 0.84f, deband = 0.52f, denoise = 0.32f,
-        edgeEnhance = 0.84f, vibrance = 0.36f, resolutionScale = 1.5f,
+        edgeEnhance = 0.84f, vibrance = 0f, resolutionScale = 1.5f,
         frameGenEnabled = frameGenEnabled, targetFps = targetFps,
         splitCompare = splitCompare, splitPosition = splitPosition
       )
       EnhancementPreset.ULTRA_QUALITY -> EnhancementConfig(
         enabled = true, preset = preset,
         upscaleStrength = 1.0f, sharpen = 0.96f, deband = 0.62f, denoise = 0.38f,
-        edgeEnhance = 0.95f, vibrance = 0.42f, resolutionScale = 2.0f,
+        edgeEnhance = 0.95f, vibrance = 0f, resolutionScale = 2.0f,
         frameGenEnabled = frameGenEnabled, targetFps = targetFps,
         splitCompare = splitCompare, splitPosition = splitPosition
       )
       EnhancementPreset.CUSTOM -> EnhancementConfig(
         enabled = true, preset = preset,
+        vibrance = 0f,
         frameGenEnabled = frameGenEnabled, targetFps = targetFps,
         splitCompare = splitCompare, splitPosition = splitPosition
       )
@@ -160,7 +161,7 @@ data class VideoTelemetry(
     get() = when (enhancementStatus) {
       "ACTIVE_WEBGL2" -> if (frameGenActive) "4K WebGL2 + Optical-Flow Active" else "4K WebGL2 Shader Active"
       "ACTIVE_WEBGL1" -> "WebGL1 4K Fallback Active"
-      "ACTIVE_CSS_GPU_FILTER" -> "GPU Clarity & Color Boost Active"
+      "ACTIVE_CSS_GPU_FILTER" -> "GPU Clarity Boost Active"
       "ACTIVE_SVG_GPU_FILTER" -> "GPU Clarity Active"
       "UNSUPPORTED" -> "GPU Shader Unavailable"
       else -> "Native Hardware Decode"
