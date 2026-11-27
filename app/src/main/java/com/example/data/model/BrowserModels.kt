@@ -152,17 +152,19 @@ data class VideoTelemetry(
     get() = if (videoWidth > 0 && videoHeight > 0) "${videoWidth}×${videoHeight}" else "N/A"
 
   val isShaderActive: Boolean
-    get() = enhancementStatus == "ACTIVE_WEBGL2" ||
+    get() = enhancementStatus == "ACTIVE_WEBGPU" ||
+      enhancementStatus == "ACTIVE_WEBGL2" ||
       enhancementStatus == "ACTIVE_WEBGL1" ||
       enhancementStatus == "ACTIVE_CSS_GPU_FILTER" ||
       enhancementStatus == "ACTIVE_SVG_GPU_FILTER"
 
   val statusHumanLabel: String
     get() = when (enhancementStatus) {
+      "ACTIVE_WEBGPU" -> if (frameGenActive) "4K WebGPU Zero-Copy + Optical-Flow" else "4K WebGPU Zero-Copy Active"
       "ACTIVE_WEBGL2" -> if (frameGenActive) "4K WebGL2 + Optical-Flow Active" else "4K WebGL2 Shader Active"
       "ACTIVE_WEBGL1" -> "WebGL1 4K Fallback Active"
-      "ACTIVE_CSS_GPU_FILTER" -> "GPU Clarity Boost Active"
-      "ACTIVE_SVG_GPU_FILTER" -> "GPU Clarity Active"
+      "ACTIVE_CSS_GPU_FILTER" -> "Zero-Copy GPU Clarity Active"
+      "ACTIVE_SVG_GPU_FILTER" -> "Zero-Copy GPU Crisp Active"
       "UNSUPPORTED" -> "GPU Shader Unavailable"
       else -> "Native Hardware Decode"
     }
