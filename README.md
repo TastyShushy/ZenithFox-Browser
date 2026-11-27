@@ -18,11 +18,31 @@
 
 ---
 
+## 📸 Visual Showcase — 4K Upscaling & Live Frame Generation
+
+<div align="center">
+
+### 1080p Native vs. Real-Time 4K GPU Upscaling
+<img src="public/assets/aistudio/IMG_20261127_215847_6992fd18.jpg" alt="ZenithFox Browser 1080p Native vs 4K Upscaled Comparison" width="680" />
+<br />
+<sub><em>Real-time side-by-side capture: sharper textures, crisp details, and 100% original colors with zero black crush.</em></sub>
+
+<br /><br />
+
+### Live GPU Optical-Flow Frame Generation (`60 → 81 FPS`)
+<img src="public/assets/aistudio/IMG_20261127_215452_4b1045c4.jpg" alt="ZenithFox Browser Live Frame Generation 60 to 81 FPS HUD" width="480" />
+<br />
+<sub><em>In-player floating HUD showing real-time GPU optical-flow interpolation boosting playback framerate live.</em></sub>
+
+</div>
+
+---
+
 ## 🚀 What's New in v2.0.0 (Chromium Edition)
 - **Full Migration from Mozilla GeckoView → Android Chromium (`Blink + V8 + ANGLE`)**:
   - **Ultra-Lightweight Universal APK**: Slashed APK size from ~90 MB down to **~12–21 MB** with support for all Android devices (arm64, arm32, x86_64).
-  - **Pure-GPU FP16 AniLens 4K Anime4K + FidelityFX CAS Upscaling**: Runs in native FP16 (`mediump`) 5-tap zero-`exp()`/zero-`sqrt()` shaders with in-place `texSubImage2D` GPU uploads, zero double-compositing WebView FBOs (`LAYER_TYPE_NONE`), and automatic delivered-FPS GPU scaling so both flagship (POCO X6 Pro / Mali-G615) and budget GPUs deliver crisp 4K-look anime at **full native 24/30 FPS** with ultra-low battery draw and **100% original colors**!
-  - **Artifact-Free FP16 GPU Optical-Flow Frame Generation (MCFI)**: Phase-locked (`requestVideoFrameCallback`) lightweight 12-tap FP16 bidirectional optical-flow with RGB photometric verification, scene-cut & subtitle anti-ghost guards, and temporally coherent pre-blend sharpening up to 60 FPS.
+  - **Pure-GPU 3-Tier Zero-Decay 4K Upscaling**: Combines **Tier 1 Native WebGPU Zero-Copy (`importExternalTexture`)**, **Tier 2 Fence-Guarded FP16 WebGL2** (`gl.fenceSync` queue cap, 3-texture ring buffer, pure `rVFC` cadence, low-power GPU profile), and **Tier 3 Automatic Zero-Copy Skia GPU Watchdog** so both flagship (POCO X6 Pro / Mali-G615) and budget GPUs deliver crisp 4K-look anime at **constant native 24/30 FPS** with zero FPS decay over time, ultra-low battery draw, and **100% original colors**.
+  - **Artifact-Free GPU Optical-Flow Frame Generation (MCFI)**: Phase-locked (`requestVideoFrameCallback`) lightweight 12-tap bidirectional optical-flow with RGB photometric verification, scene-cut & subtitle anti-ghost guards, and temporally coherent pre-blend sharpening up to 60/90/120 FPS.
   - **Physical Side-by-Side Comparison Slider & Anti-Accidental-Touch Screen Lock**: Drag the tactile physical divider directly over playing anime to compare **Original** vs. **4K**, or tap the new **Screen Lock** button (in both Fullscreen Pill and Video Tools) to block all stray touches & back gestures until you intentionally tap **Unlock**.
   - **Multi-Frame Extension Injection**: Built-in **4K/FrameGen Enhancer**, **HLS/MP4 Video Downloader**, and **Ad/Tracker/Popup Shield** run natively at `document_start` across both the main page and cross-origin embedded anime iframes via `androidx.webkit`.
 - **Zero-Drain Battery & 60 Hz Power Optimization**:
@@ -104,7 +124,7 @@ gradle :app:assembleDebug
 ## 🧱 Tech Stack & Architecture
 - **Browser Engine**: Android Chromium WebView + `androidx.webkit:webkit:1.12.1` (Blink + V8 + ANGLE GPU + Document-Start Multi-Frame JS + WebMessageListener)
 - **UI Framework**: Kotlin + Jetpack Compose + Material Design 3
-- **GPU Shaders**: Single-Pass WebGL2 / WebGL1 GLSL ES 3.00 + Optical-Flow MCFI + Skia-GPU SVG `<feConvolveMatrix>` (`assets/chromium/zenithfox_engine.js`)
+- **GPU Shaders**: 3-Tier Pure-GPU Engine — Native WebGPU Zero-Copy (`WGSL`) + Fence-Guarded FP16 WebGL2 / WebGL1 (`GLSL`) + Optical-Flow MCFI + Automatic Zero-Copy Skia GPU `<feConvolveMatrix>` Watchdog (`assets/chromium/zenithfox_engine.js`)
 - **Built-In Modules**: 4K WebGL2 Enhancer & Frame Gen, HLS/MP4 Video Downloader, Network & Cosmetic Ad/Popup Shield
 - **Local Storage**: Room Database + Jetpack DataStore (100% on-device privacy)
 - **Networking**: OkHttp 4 (HLS manifest & video size probing, GitHub Releases updater)
