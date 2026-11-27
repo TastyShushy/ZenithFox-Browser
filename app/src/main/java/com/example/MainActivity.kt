@@ -87,6 +87,7 @@ import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.PrivacyDashboardScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SitePermissionsScreen
+import com.example.ui.screens.SplitCompareOverlay
 import com.example.ui.screens.TabSwitcherScreen
 import com.example.ui.screens.VideoDownloaderSheet
 import com.example.ui.screens.VideoEnhancementSheet
@@ -693,6 +694,25 @@ private fun AnimeBrowserRoot(
                   )
                 }
 
+                // Physical Draggable Side-by-Side Before/After Comparison Slider directly on playing anime!
+                // Non-blocking: only the vertical divider handle captures drags; rest of screen controls video normally.
+                if (enhancementConfig.splitCompare && videoTelemetry.hasVideo && !isInPipMode) {
+                  val rightLabel = buildString {
+                    append(if (enhancementConfig.enabled) "4K ANIME4K" else "ENHANCED")
+                    if (videoTelemetry.frameGenActive && videoTelemetry.outputFps > 0) {
+                      append(" • ${videoTelemetry.outputFps} FPS")
+                    }
+                  }
+                  SplitCompareOverlay(
+                    splitPosition = enhancementConfig.splitPosition,
+                    rightSideLabel = rightLabel,
+                    isFullscreen = isAnyFullscreen,
+                    onSplitPositionChange = viewModel::updateSplitPositionLive,
+                    onExitCompare = { viewModel.toggleSplitCompare(false) },
+                    modifier = Modifier.fillMaxSize()
+                  )
+                }
+
                 // Floating Video Controls & Video Downloader FAB column (hidden during Fullscreen and PiP)
                 if ((videoTelemetry.hasVideo || detectedStreams.isNotEmpty()) && !hideBrowserChrome) {
                   Column(
@@ -740,7 +760,9 @@ private fun AnimeBrowserRoot(
                     customZoom = customZoom,
                     detectedStreamCount = detectedStreams.size,
                     isForceFullscreen = isForceFullScreen,
+                    isSplitCompareActive = enhancementConfig.splitCompare,
                     onSetScalingMode = viewModel::setScalingMode,
+                    onToggleSplitCompare = { viewModel.toggleSplitCompare(!enhancementConfig.splitCompare) },
                     onOpenEnhancer = { showEnhancerSheet = true },
                     onOpenDownloader = { showVideoDownloaderSheet = true },
                     onOpenControlPanel = { showVideoControlPanel = true },

@@ -868,6 +868,20 @@ class ChromiumEngineManager(
     sendJsonToActiveTab(buildEnhancementMessage(config))
   }
 
+  /**
+   * Ultra-lightweight 60 FPS split-divider position update for the physical on-video slider.
+   */
+  fun sendSplitPositionLive(position: Float) {
+    val clamped = position.coerceIn(0.02f, 0.98f)
+    cachedEnhancementConfig = cachedEnhancementConfig?.copy(splitPosition = clamped)
+    sendJsonToActiveTab(JSONObject().apply {
+      put("type", "SET_SPLIT_POS")
+      put("payload", JSONObject().apply {
+        put("splitPosition", clamped.toDouble())
+      })
+    })
+  }
+
   fun sendScalingMode(mode: VideoScalingMode, customZoom: Float) {
     cachedScaling = mode to customZoom
     sendJsonToActiveTab(buildScalingMessage(mode, customZoom))

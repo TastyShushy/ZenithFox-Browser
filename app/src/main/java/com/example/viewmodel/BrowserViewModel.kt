@@ -820,6 +820,31 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     chromiumEngine.sendEnhancementConfig(next)
   }
 
+  fun toggleSplitCompare(enabled: Boolean) {
+    val current = _enhancementConfig.value
+    val next = if (enabled && !current.enabled) {
+      val preset = settings.value.defaultEnhancementPreset.takeIf { it != EnhancementPreset.OFF }
+        ?: EnhancementPreset.HIGH_QUALITY
+      EnhancementConfig.forPreset(
+        preset = preset,
+        frameGenEnabled = current.frameGenEnabled,
+        targetFps = current.targetFps,
+        splitCompare = true,
+        splitPosition = current.splitPosition
+      )
+    } else {
+      current.copy(splitCompare = enabled)
+    }
+    _enhancementConfig.value = next
+    chromiumEngine.sendEnhancementConfig(next)
+  }
+
+  fun updateSplitPositionLive(position: Float) {
+    val clamped = position.coerceIn(0.05f, 0.95f)
+    _enhancementConfig.value = _enhancementConfig.value.copy(splitPosition = clamped)
+    chromiumEngine.sendSplitPositionLive(clamped)
+  }
+
   fun videoTogglePlay() = chromiumEngine.sendVideoControl("TOGGLE_PLAY")
   fun videoSeekBy(seconds: Double) = chromiumEngine.sendVideoControl("SEEK_BY", seconds = seconds)
   fun videoSeekTo(seconds: Double) = chromiumEngine.sendVideoControl("SEEK_TO", seconds = seconds)

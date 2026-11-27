@@ -243,7 +243,7 @@ fun VideoEnhancementSheet(
           )
         }
 
-        // Live Before / After Split-Screen Compare Control
+        // Live Before / After Physical Split-Screen Compare Control
         Surface(
           shape = RoundedCornerShape(16.dp),
           color = if (config.splitCompare) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
@@ -258,7 +258,7 @@ fun VideoEnhancementSheet(
         ) {
           Column(
             modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
           ) {
             Row(
               modifier = Modifier.fillMaxWidth(),
@@ -267,29 +267,63 @@ fun VideoEnhancementSheet(
             ) {
               Column(modifier = Modifier.weight(1f)) {
                 Text(
-                  text = "Live Before / After Split Compare",
+                  text = "Live Side-by-Side Compare Slider",
                   style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
                 )
                 Text(
-                  text = "Left: Original • Right: 4K Crisp Anime4K + CAS",
+                  text = "Drag the physical divider directly over playing anime (Left: Original • Right: 4K)",
                   style = MaterialTheme.typography.labelSmall,
                   color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
               }
               Switch(
                 checked = config.splitCompare,
-                onCheckedChange = { on -> onUpdateCustom { it.copy(splitCompare = on) } },
+                onCheckedChange = { on ->
+                  onUpdateCustom { it.copy(splitCompare = on) }
+                  if (on) onDismiss()
+                },
                 modifier = Modifier.testTag("enhancer_split_compare_switch")
               )
             }
             if (config.splitCompare) {
-              ShaderSliderRow(
-                label = "Split Divider Position",
-                value = config.splitPosition,
-                valueRange = 0.1f..0.9f,
-                valueLabel = "${(config.splitPosition * 100).roundToInt()}%",
-                onValueChange = { pos -> onUpdateCustom { it.copy(splitPosition = pos) } }
-              )
+              Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+              ) {
+                Surface(
+                  onClick = onDismiss,
+                  shape = RoundedCornerShape(12.dp),
+                  color = MaterialTheme.colorScheme.primary,
+                  contentColor = MaterialTheme.colorScheme.onPrimary,
+                  modifier = Modifier
+                    .weight(1f)
+                    .testTag("enhancer_compare_on_video_button")
+                ) {
+                  Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                  ) {
+                    Text(
+                      text = "Drag Slider on Video (${(config.splitPosition * 100).roundToInt()}%)",
+                      style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
+                    )
+                  }
+                }
+                Surface(
+                  onClick = { onUpdateCustom { it.copy(splitPosition = 0.5f) } },
+                  shape = RoundedCornerShape(12.dp),
+                  color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                  contentColor = MaterialTheme.colorScheme.onSurface,
+                  modifier = Modifier.testTag("enhancer_compare_center_button")
+                ) {
+                  Text(
+                    text = "Center",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                  )
+                }
+              }
             }
           }
         }

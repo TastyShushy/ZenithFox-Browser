@@ -20,9 +20,10 @@
 
 ## 🚀 What's New in v2.0.0 (Chromium Edition)
 - **Full Migration from Mozilla GeckoView → Android Chromium (`Blink + V8 + ANGLE`)**:
-  - **Ultra-Lightweight Universal APK**: Slashed APK size from ~90 MB down to **~12 MB** with support for all Android devices (arm64, arm32, x86_64).
-  - **Native Zero-Copy WebGL2 4K Upscaling**: Eliminates GeckoView's Mali GPU black/pink screen bug permanently! Runs a fast single-pass **Anime4K Directional Line-Thinning + AMD FidelityFX CAS + Dual-Scale Micro-Detail** shader directly on Chromium's ANGLE GPU with **100% original video colors (zero color grading)** — plus an automatic **Skia-GPU SVG 3×3 Convolution** sharpening path for cross-origin direct MP4 videos.
-  - **Smooth 60 FPS GPU Optical-Flow Frame Generation (MCFI)**: Rebuilt with a fast 5-tap bidirectional Lucas-Kanade optical-flow estimator tuned for mobile GPUs, synced dynamically to each video's real decoded cadence with scene-cut ghost protection.
+  - **Ultra-Lightweight Universal APK**: Slashed APK size from ~90 MB down to **~12–21 MB** with support for all Android devices (arm64, arm32, x86_64).
+  - **AniLens-Grade Luma-Only 4K Anime4K + FidelityFX CAS Upscaling**: Eliminates black-crushed dark scenes, blown-out colors, and Mali GPU pink-screen bugs permanently! Uses channel-headroom clamped luma reconstruction directly on Chromium's ANGLE GPU with **100% original colors** and **true native frame cadence** (24 FPS anime stays crisp 24 FPS when only upscaling is enabled, cutting GPU & battery draw by ~60%) — plus an automatic **Skia-GPU SVG 3×3 Convolution** path for cross-origin direct MP4 videos.
+  - **Artifact-Free Multi-Scale GPU Optical-Flow Frame Generation (MCFI)**: Upgraded to a phase-locked (`requestVideoFrameCallback`) bidirectional optical-flow estimator with RGB photometric verification, hard scene-cut & subtitle anti-ghost guards, and temporally coherent 4K sharpening before blending so moving anime scenes stay crisp up to 60 FPS with zero doubled outlines or warping glitches.
+  - **Physical Side-by-Side Comparison Slider on Playing Video**: Grab and drag the tactile physical divider handle directly across any playing anime (normal or fullscreen) to compare **Original** vs. **4K Anime4K** live without blocking video controls.
   - **Multi-Frame Extension Injection**: Built-in **4K/FrameGen Enhancer**, **HLS/MP4 Video Downloader**, and **Ad/Tracker/Popup Shield** run natively at `document_start` across both the main page and cross-origin embedded anime iframes via `androidx.webkit`.
 - **Zero-Drain Battery & 60 Hz Power Optimization**:
   - Prefers power-efficient **60 Hz** display refresh rate by default (unlocking >60 Hz only when you actively enable 90/120 FPS Frame Gen).
@@ -38,10 +39,10 @@
 ## ✨ Key Features
 
 ### 🎬 Native Chromium 4K Video Upscaling & GPU Frame Generation
-- **Crisp 4K Upscaling (Exact Original Colors)**: Fast single-pass WebGL2 GLSL ES 3.00 pipeline combining bilateral compression denoise, sky anti-banding, Anime4K dark line-thinning, NaN-free AMD FidelityFX CAS, and high-frequency micro-detail recovery — with **zero saturation, hue, or brightness alteration**.
+- **AniLens-Style 4K Upscaling (Exact Original Colors & True Native FPS)**: Fast single-pass WebGL2 GLSL ES 3.00 pipeline combining bilateral compression denoise, sky anti-banding, Anime4K thin-line reconstruction, and channel-headroom clamped AMD FidelityFX CAS — preserving **100% original colors, dark scenes, and true 24/30 FPS video cadence**.
 - **Cross-Origin Video Sharpening**: Automatically activates Chromium's GPU-accelerated SVG `<feConvolveMatrix>` sharpening filter on cross-origin direct MP4 streams where WebGL pixel access is restricted.
-- **Dynamic GPU Optical-Flow Frame Generation**: Smoothly interpolates 24/30 FPS anime and web videos up to **60 / 90 / 120 FPS** with smart 1440p GPU scaling cap and scene-cut anti-ghosting.
-- **Live Before / After Split Compare**: Drag an interactive split-screen divider to compare raw video vs. 4K enhanced output in real time.
+- **Artifact-Free GPU Optical-Flow Frame Generation**: Smoothly interpolates 24/30 FPS anime and web videos up to **60 / 90 / 120 FPS** with multi-scale RGB verification, scene-cut & subtitle ghost protection, and coherent pre-blend sharpening.
+- **Physical Side-by-Side Compare Slider**: Drag a sleek non-blocking physical divider directly over the playing anime video (in normal or fullscreen view) to compare raw original vs. 4K enhanced output in real time.
 
 ### 📐 Non-Blocking Fullscreen, Auto Picture-in-Picture & Blur-Free Scaling
 - **Automatic Picture-in-Picture Pop-Up Mode**: Minimize ZenithFox while watching anime or YouTube and it pops out cleanly into a floating PiP window — and resumes back to full screen without black screens.

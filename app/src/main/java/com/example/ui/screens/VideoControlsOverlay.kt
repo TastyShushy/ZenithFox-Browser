@@ -37,6 +37,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Brightness6
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ClosedCaption
+import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.Forward10
@@ -434,7 +435,9 @@ fun FullscreenToolsCornerPill(
   customZoom: Float,
   detectedStreamCount: Int,
   isForceFullscreen: Boolean,
+  isSplitCompareActive: Boolean,
   onSetScalingMode: (VideoScalingMode, Float) -> Unit,
+  onToggleSplitCompare: () -> Unit,
   onOpenEnhancer: () -> Unit,
   onOpenDownloader: () -> Unit,
   onOpenControlPanel: () -> Unit,
@@ -514,6 +517,16 @@ fun FullscreenToolsCornerPill(
         ) {
           IconButton(onClick = { expanded = false; onOpenEnhancer() }) {
             Icon(Icons.Filled.AutoAwesome, contentDescription = "4K Upscaling & Frame Gen", tint = MaterialTheme.colorScheme.primary)
+          }
+          IconButton(
+            onClick = { expanded = false; onToggleSplitCompare() },
+            modifier = Modifier.testTag("fullscreen_split_compare_button")
+          ) {
+            Icon(
+              Icons.Filled.Compare,
+              contentDescription = "Toggle side-by-side 4K compare slider",
+              tint = if (isSplitCompareActive) MaterialTheme.colorScheme.primary else Color.White
+            )
           }
           Surface(
             onClick = {
