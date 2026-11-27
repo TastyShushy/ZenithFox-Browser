@@ -77,6 +77,18 @@ class AnimeBrowserCoreLogicTest {
     assertEquals("1920×1080", webgl2.resolutionLabel)
     assertEquals("4K WebGL2 + Optical-Flow Active", webgl2.statusHumanLabel)
 
+    val webgpu = VideoTelemetry(
+      hasVideo = true,
+      videoWidth = 1920,
+      videoHeight = 1080,
+      sourceFps = 24,
+      outputFps = 24,
+      enhancementStatus = "ACTIVE_WEBGPU",
+      webGpuSupported = true
+    )
+    assertTrue(webgpu.isShaderActive)
+    assertEquals("4K WebGPU Zero-Copy Active", webgpu.statusHumanLabel)
+
     val cssSafeFallback = VideoTelemetry(
       hasVideo = true,
       videoWidth = 1920,
@@ -86,11 +98,11 @@ class AnimeBrowserCoreLogicTest {
       enhancementStatus = "ACTIVE_CSS_GPU_FILTER"
     )
     assertTrue(cssSafeFallback.isShaderActive)
-    assertEquals("GPU Clarity Boost Active", cssSafeFallback.statusHumanLabel)
+    assertEquals("Zero-Copy GPU Clarity Active", cssSafeFallback.statusHumanLabel)
     assertEquals(com.example.data.model.AccentPalette.ZENITH_VIOLET, com.example.data.model.BrowserSettings().accentPalette)
 
     assertTrue(svgFallback.isShaderActive)
-    assertEquals("GPU Clarity Active", svgFallback.statusHumanLabel)
+    assertEquals("Zero-Copy GPU Crisp Active", svgFallback.statusHumanLabel)
 
     assertFalse(corsProtected.isShaderActive)
     assertEquals("1280×720", corsProtected.resolutionLabel)
