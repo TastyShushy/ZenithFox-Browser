@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
@@ -124,6 +125,7 @@ fun FloatingVideoControlPanel(
   onOpenEnhancer: () -> Unit,
   onOpenDownloader: () -> Unit,
   onEnterPip: () -> Unit,
+  onLockScreen: () -> Unit,
   onTogglePlayPause: () -> Unit,
   onSeekBy: (Double) -> Unit,
   onSetSpeed: (Float) -> Unit,
@@ -209,6 +211,12 @@ fun FloatingVideoControlPanel(
             )
           }
           Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(
+              onClick = { onDismiss(); onLockScreen() },
+              modifier = Modifier.testTag("video_screen_lock_button")
+            ) {
+              Icon(Icons.Filled.Lock, contentDescription = "Lock screen against accidental touches")
+            }
             IconButton(onClick = { onDismiss(); onEnterPip() }, modifier = Modifier.testTag("video_pip_button")) {
               Icon(Icons.Filled.PictureInPictureAlt, contentDescription = "Picture in Picture")
             }
@@ -444,6 +452,7 @@ fun FullscreenToolsCornerPill(
   onSkipIntro85: () -> Unit,
   onToggleOrientation: () -> Unit,
   onEnterPip: () -> Unit,
+  onLockScreen: () -> Unit,
   onExitFullscreen: () -> Unit,
   modifier: Modifier = Modifier
 ) {
@@ -573,6 +582,12 @@ fun FullscreenToolsCornerPill(
           }
           IconButton(onClick = { expanded = false; onEnterPip() }) {
             Icon(Icons.Filled.PictureInPictureAlt, contentDescription = "Picture in Picture", tint = Color.White)
+          }
+          IconButton(
+            onClick = { expanded = false; onLockScreen() },
+            modifier = Modifier.testTag("fullscreen_screen_lock_button")
+          ) {
+            Icon(Icons.Filled.Lock, contentDescription = "Lock screen against accidental touches", tint = Color.White)
           }
           if (isForceFullscreen) {
             IconButton(onClick = { expanded = false; onExitFullscreen() }) {

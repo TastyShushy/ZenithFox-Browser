@@ -85,6 +85,7 @@ import com.example.ui.screens.FullscreenToolsCornerPill
 import com.example.ui.screens.HistoryScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.PrivacyDashboardScreen
+import com.example.ui.screens.ScreenLockOverlay
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.SitePermissionsScreen
 import com.example.ui.screens.SplitCompareOverlay
@@ -358,10 +359,11 @@ private fun AnimeBrowserRoot(
   var showFindInPage by remember { mutableStateOf(false) }
   var findQuery by remember { mutableStateOf("") }
   var showQrDialog by remember { mutableStateOf(false) }
+  var isScreenLocked by remember { mutableStateOf(false) }
 
   val snackbarHostState = remember { SnackbarHostState() }
   val isAnyFullscreen = isWebFullScreen || isForceFullScreen || fullscreenCustomView != null
-  val hideBrowserChrome = isAnyFullscreen || isInPipMode
+  val hideBrowserChrome = isAnyFullscreen || isInPipMode || isScreenLocked
 
   val androidPermissionLauncher = rememberLauncherForActivityResult(
     contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -413,7 +415,10 @@ private fun AnimeBrowserRoot(
     onUpdatePipParams(canAutoPip, videoTelemetry.videoWidth, videoTelemetry.videoHeight)
   }
 
-  LaunchedEffect(isInPipMode) {
+  LaunchedEffect(isInPipMode, activeTab?.isHomePage, currentRoute) {
+    if (isInPipMode || activeTab?.isHomePage == true || currentRoute != BrowserScreenRoute.BROWSER) {
+      isScreenLocked = false
+    }
     if (isInPipMode) {
       showMenuSheet = false
       showEnhancerSheet = false
@@ -695,8 +700,8 @@ private fun AnimeBrowserRoot(
                 }
 
                 // Physical Draggable Side-by-Side Before/After Comparison Slider directly on playing anime!
-                // Non-blocking: only the vertical divider handle captures drags; rest of screen controls video normally.
-                if (enhancementConfig.splitCompare && videoTelemetry.hasVideo && !isInPipMode) {
+                // Non-blocking: only the vertical divider handle captures drags; hidden while Screen Lock is active.
+                if (enhancementConfig.splitCompare && videoTelemetry.hasVideo && !isInPipMode && !isScreenLocked) {
                   val rightLabel = buildString {
                     append(if (enhancementConfig.enabled) "4K ANIME4K" else "ENHANCED")
                     if (videoTelemetry.frameGenActive && videoTelemetry.outputFps > 0) {
@@ -713,8 +718,8 @@ private fun AnimeBrowserRoot(
                   )
                 }
 
-                // Floating Video Controls & Video Downloader FAB column (hidden during Fullscreen and PiP)
-                if ((videoTelemetry.hasVideo || detectedStreams.isNotEmpty()) && !hideBrowserChrome) {
+                // Floating Video Controls & Video Downloader FAB column (hidden during Fullscreen, PiP & Screen Lock)
+                if ((videoTelemetry.hasVideo || detectedStreams.isNotEmpty()) && !hideBrowserChrome && !isScreenLocked) {
                   Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -752,8 +757,8 @@ private fun AnimeBrowserRoot(
                   }
                 }
 
-                // Non-blocking Fullscreen Floating Corner Pill (renders above native HTML5 fullscreen; hidden in PiP)
-                if (isAnyFullscreen && !isInPipMode) {
+                // Non-blocking Fullscreen Floating Corner Pill (hidden in PiP & when Screen Lock is active)
+                if (isAnyFullscreen && !isInPipMode && !isScreenLocked) {
                   FullscreenToolsCornerPill(
                     telemetry = videoTelemetry,
                     scalingMode = scalingMode,
@@ -769,8 +774,24 @@ private fun AnimeBrowserRoot(
                     onSkipIntro85 = { viewModel.seekVideoBy(85.0) },
                     onToggleOrientation = onToggleOrientation,
                     onEnterPip = onEnterPip,
+                    onLockScreen = {
+                      showEnhancerSheet = false
+                      showVideoControlPanel = false
+                      showVideoDownloaderSheet = false
+                      showMenuSheet = false
+                      isScreenLocked = true
+                    },
                     onExitFullscreen = viewModel::exitAnyFullscreen,
                     modifier = Modifier.align(Alignment.TopEnd)
+                  )
+                }
+
+                // Anti-Accidental-Touch Screen Lock Shield (absorbs all stray touches over web video player!)
+                if (isScreenLocked && !isInPipMode) {
+                  ScreenLockOverlay(
+                    isFullscreen = isAnyFullscreen,
+                    onUnlock = { isScreenLocked = false },
+                    modifier = Modifier.fillMaxSize()
                   )
                 }
               }
@@ -852,6 +873,7 @@ private fun AnimeBrowserRoot(
           onOpenEnhancer = { showEnhancerSheet = true },
           onOpenDownloader = { showVideoDownloaderSheet = true },
           onEnterPip = onEnterPip,
+          onLockScreen = { isScreenLocked = true },
           onTogglePlayPause = viewModel::toggleVideoPlayPause,
           onSeekBy = viewModel::seekVideoBy,
           onSetSpeed = viewModel::setVideoPlaybackSpeed,

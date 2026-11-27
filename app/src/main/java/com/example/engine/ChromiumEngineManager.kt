@@ -375,8 +375,11 @@ class ChromiumEngineManager(
       }
     }
 
-    webView.setBackgroundColor(Color.TRANSPARENT)
-    webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+    // Use opaque background & native LAYER_TYPE_NONE: WebView is already hardware-accelerated via
+    // android:hardwareAccelerated="true". Forcing LAYER_TYPE_HARDWARE allocates a redundant full-screen
+    // offscreen FBO copy on every WebGL2 frame (causing severe Mali GPU FPS drops at high resolutions).
+    webView.setBackgroundColor(Color.BLACK)
+    webView.setLayerType(View.LAYER_TYPE_NONE, null)
 
     webViews[tabId] = webView
     return webView
