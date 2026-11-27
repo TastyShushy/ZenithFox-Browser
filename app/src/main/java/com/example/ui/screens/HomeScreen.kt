@@ -181,7 +181,7 @@ fun HomeScreen(
                 } else {
                   StatusBadge(
                     icon = Icons.Filled.AutoAwesome,
-                    text = if (enhancementConfig.enabled) "ANIME4K ${enhancementConfig.preset.label.uppercase()}" else "GECKOVIEW 140",
+                    text = if (enhancementConfig.enabled) "4K ${enhancementConfig.preset.label.uppercase()}" else "CHROMIUM 2.0",
                     color = MaterialTheme.colorScheme.primary
                   )
                 }

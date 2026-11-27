@@ -1,8 +1,12 @@
 package com.example.viewmodel
 
+import android.Manifest
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.webkit.GeolocationPermissions
+import android.webkit.PermissionRequest
+import android.webkit.WebView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.AnimeBrowserApplication
@@ -21,7 +25,7 @@ import com.example.data.model.HlsVariant
 import com.example.data.model.PerformanceProfile
 import com.example.data.model.PerformanceStats
 import com.example.data.model.VideoScalingMode
-import com.example.engine.GeckoEngineManager
+import com.example.engine.ChromiumEngineManager
 import com.example.engine.UrlUtils
 import com.example.updater.AppReleaseInfo
 import com.example.updater.AppUpdateManager
@@ -34,24 +38,23 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import org.mozilla.geckoview.GeckoResult
-import org.mozilla.geckoview.GeckoSession
 import java.util.UUID
 
 data class PendingSitePermission(
   val host: String,
-  val permissionType: Int,
   val permissionLabel: String,
-  val geckoResult: GeckoResult<Int>
+  val isGeolocation: Boolean = false,
+  val onResolve: (allow: Boolean, remember: Boolean) -> Unit
 )
 
 data class PendingAndroidPermission(
   val permissions: Array<String>,
-  val callback: GeckoSession.PermissionDelegate.Callback
+  val onResult: (Boolean) -> Unit
 )
 
 class BrowserViewModel(application: Application) : AndroidViewModel(application) {
@@ -59,7 +62,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
   private val app = application as AnimeBrowserApplication
   private val db = app.database
   private val prefs = app.preferencesRepository
-  val geckoEngine = app.geckoEngine
+  val chromiumEngine = app.chromiumEngine
   val adBlockEngine = app.adBlockEngine
   val downloadManager = app.downloadManager
   private val perfMonitor = app.performanceMonitor
@@ -91,10 +94,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
   val totalBlockedCount = adBlockEngine.totalBlockedCount
   val recentBlockedEvents = adBlockEngine.recentBlocked
 
-  val videoTelemetry = geckoEngine.videoTelemetry
-  val detectedStreams = geckoEngine.detectedStreams
-  val extensions = geckoEngine.extensions
-  val readerArticle = geckoEngine.readerArticle
+  val videoTelemetry = chromiumEngine.videoTelemetry
+  val detectedStreams = chromiumEngine.detectedStreams
+  val extensions = chromiumEngine.extensions
+  val readerArticle = chromiumEngine.readerArticle
+  val fullscreenCustomView = chromiumEngine.fullscreenCustomView
+  val webViewGeneration = chromiumEngine.webViewGeneration
 
   private val _hlsVariantsByUrl = MutableStateFlow<Map<String, List<HlsVariant>>>(emptyMap())
   val hlsVariantsByUrl: StateFlow<Map<String, List<HlsVariant>>> = _hlsVariantsByUrl.asStateFlow()
@@ -158,11 +163,15 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
   val isCheckingForUpdate: StateFlow<Boolean> = _isCheckingForUpdate.asStateFlow()
 
   private var suggestionJob: Job? = null
+  private var persistTabsJob: Job? = null
+  private var perfStatsJob: Job? = null
   private var lastRecordedVideoUrl: String = ""
   private var startupUpdateCheckDone = false
+  @Volatile private var isAppInForeground = true
 
-  private val sessionListener = object : GeckoEngineManager.SessionEventListener {
+  private val sessionListener = object : ChromiumEngineManager.SessionEventListener {
     override fun onLocationChanged(tabId: String, url: String) {
+      if (url.isBlank() || url == "about:blank") return
       updateTab(tabId) { it.copy(url = url, isSuspended = false, lastAccessedAt = System.currentTimeMillis()) }
       val tab = _tabs.value.find { it.id == tabId }
       if (tab != null && !tab.isPrivate && url.startsWith("http")) {
@@ -172,6 +181,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     override fun onTitleChanged(tabId: String, title: String) {
+      if (title.isBlank() || title == "about:blank") return
       updateTab(tabId) { it.copy(title = title) }
       val tab = _tabs.value.find { it.id == tabId }
       if (tab != null && !tab.isPrivate && tab.url.startsWith("http")) {
@@ -185,10 +195,11 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     override fun onPageStart(tabId: String, url: String) {
-      updateTab(tabId) { it.copy(url = url, isLoading = true, progress = 5) }
+      if (url == "about:blank") return
+      updateTab(tabId) { it.copy(url = url, isLoading = true, progress = 5, lastAccessedAt = System.currentTimeMillis()) }
       if (tabId == _activeTabId.value) {
-        geckoEngine.resetVideoTelemetry()
-        geckoEngine.clearDetectedStreams()
+        chromiumEngine.resetVideoTelemetry()
+        chromiumEngine.clearDetectedStreams()
         _hlsVariantsByUrl.value = emptyMap()
       }
     }
@@ -196,8 +207,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     override fun onPageStop(tabId: String, success: Boolean) {
       updateTab(tabId) { it.copy(isLoading = false, progress = 100) }
       if (tabId == _activeTabId.value) {
-        geckoEngine.sendEnhancementConfig(_enhancementConfig.value)
-        geckoEngine.sendScalingMode(_scalingMode.value, _customZoom.value)
+        chromiumEngine.sendEnhancementConfig(_enhancementConfig.value)
+        chromiumEngine.sendScalingMode(_scalingMode.value, _customZoom.value)
       }
     }
 
@@ -227,49 +238,83 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
       _blockedRedirectUrl.value = blockedUrl
     }
 
-    override fun onPermissionRequested(
+    override fun onGeolocationPermissionRequested(
       tabId: String,
       host: String,
-      permissionType: Int,
-      result: GeckoResult<Int>
+      origin: String,
+      callback: GeolocationPermissions.Callback
     ) {
       viewModelScope.launch {
         val saved = db.siteSettingDao().getForHost(host)
-        val decision = when (permissionType) {
-          GeckoSession.PermissionDelegate.PERMISSION_GEOLOCATION -> saved?.locationPermission
-          else -> null
-        }
-        when (decision) {
-          "ALLOW" -> result.complete(GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW)
-          "DENY" -> result.complete(GeckoSession.PermissionDelegate.ContentPermission.VALUE_DENY)
-          else -> {
-            val label = when (permissionType) {
-              GeckoSession.PermissionDelegate.PERMISSION_GEOLOCATION -> "Location"
-              GeckoSession.PermissionDelegate.PERMISSION_DESKTOP_NOTIFICATION -> "Notifications"
-              GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_AUDIBLE,
-              GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_INAUDIBLE -> "Media Autoplay"
-              GeckoSession.PermissionDelegate.PERMISSION_MEDIA_KEY_SYSTEM_ACCESS -> "Protected Media (DRM)"
-              else -> "Site Permission"
+        when (saved?.locationPermission) {
+          "ALLOW" -> {
+            _pendingAndroidPermission.value = PendingAndroidPermission(
+              permissions = arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+            ) { granted ->
+              callback.invoke(origin, granted, true)
             }
-            if (permissionType == GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_AUDIBLE ||
-              permissionType == GeckoSession.PermissionDelegate.PERMISSION_AUTOPLAY_INAUDIBLE ||
-              permissionType == GeckoSession.PermissionDelegate.PERMISSION_MEDIA_KEY_SYSTEM_ACCESS
-            ) {
-              // Allow video playback & standard DRM playback smoothly without breaking streaming players
-              result.complete(GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW)
-            } else {
-              _pendingSitePermission.value = PendingSitePermission(host, permissionType, label, result)
+          }
+          "DENY" -> callback.invoke(origin, false, false)
+          else -> {
+            _pendingSitePermission.value = PendingSitePermission(
+              host = host,
+              permissionLabel = "Location",
+              isGeolocation = true
+            ) { allow, remember ->
+              if (!allow) {
+                callback.invoke(origin, false, false)
+              } else {
+                _pendingAndroidPermission.value = PendingAndroidPermission(
+                  permissions = arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+                ) { granted ->
+                  callback.invoke(origin, granted, remember)
+                }
+              }
             }
           }
         }
       }
     }
 
-    override fun onAndroidPermissionsRequested(
-      permissions: Array<String>,
-      callback: GeckoSession.PermissionDelegate.Callback
+    override fun onWebPermissionRequested(
+      tabId: String,
+      host: String,
+      request: PermissionRequest
     ) {
-      _pendingAndroidPermission.value = PendingAndroidPermission(permissions, callback)
+      val resources = request.resources ?: emptyArray()
+      val needsCamera = resources.contains(PermissionRequest.RESOURCE_VIDEO_CAPTURE)
+      val needsMic = resources.contains(PermissionRequest.RESOURCE_AUDIO_CAPTURE)
+      val label = when {
+        needsCamera && needsMic -> "Camera & Microphone"
+        needsCamera -> "Camera"
+        needsMic -> "Microphone"
+        else -> "Site Permission"
+      }
+      _pendingSitePermission.value = PendingSitePermission(
+        host = host,
+        permissionLabel = label,
+        isGeolocation = false
+      ) { allow, _ ->
+        if (!allow) {
+          runCatching { request.deny() }
+          return@PendingSitePermission
+        }
+        val androidPerms = buildList {
+          if (needsCamera) add(Manifest.permission.CAMERA)
+          if (needsMic) add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (androidPerms.isEmpty()) {
+          runCatching { request.grant(resources) }
+        } else {
+          _pendingAndroidPermission.value = PendingAndroidPermission(
+            permissions = androidPerms.toTypedArray()
+          ) { granted ->
+            runCatching {
+              if (granted) request.grant(resources) else request.deny()
+            }
+          }
+        }
+      }
     }
   }
 
@@ -286,7 +331,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
   private fun scheduleStartupUpdateCheck() {
     viewModelScope.launch {
       delay(2500L)
-      if (startupUpdateCheckDone) return@launch
+      if (startupUpdateCheckDone || !isAppInForeground) return@launch
       val s = settings.value
       if (s.autoCheckUpdates && s.updateRepoSlug.isNotBlank()) {
         startupUpdateCheckDone = true
@@ -297,7 +342,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
   private fun initializeTabs() {
     viewModelScope.launch {
-      val currentSettings = settings.value
+      // Wait for real persisted preferences from DataStore so restoreTabsOnStartup is accurate
+      val currentSettings = runCatching { prefs.settingsFlow.first() }.getOrDefault(settings.value)
       val saved = if (currentSettings.restoreTabsOnStartup) db.savedTabDao().getAll() else emptyList()
       if (saved.isNotEmpty()) {
         val restored = saved.map {
@@ -312,8 +358,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             lastAccessedAt = it.lastAccessedAt
           )
         }
+        val mostRecent = restored.maxByOrNull { it.lastAccessedAt } ?: restored.first()
         _tabs.value = restored
-        _activeTabId.value = restored.first().id
+        _activeTabId.value = mostRecent.id
       } else {
         createNewTab(url = "", isPrivate = false)
       }
@@ -325,9 +372,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
       settings.collect { s ->
         adBlockEngine.isEnabled = s.adBlockEnabled
         adBlockEngine.isPopupBlockingEnabled = s.popupBlockEnabled
-        geckoEngine.syncAdBlockRulesToExtension()
-        geckoEngine.updateRuntimeJavaScript(s.javaScriptEnabled)
-        geckoEngine.updateRuntimeColorScheme(s.themeMode != com.example.data.model.ThemeMode.LIGHT)
+        chromiumEngine.syncAdBlockRulesToExtension()
+        chromiumEngine.updateRuntimeJavaScript(s.javaScriptEnabled)
+        chromiumEngine.updateRuntimeColorScheme(s.themeMode != com.example.data.model.ThemeMode.LIGHT)
 
         if (s.performanceProfile == PerformanceProfile.BATTERY_SAVER && _enhancementConfig.value.enabled) {
           applyEnhancementPreset(EnhancementPreset.OFF)
@@ -336,7 +383,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
     viewModelScope.launch {
       combine(customBlockRules, whitelistedHosts) { _, _ -> Unit }.collect {
-        geckoEngine.syncAdBlockRulesToExtension()
+        chromiumEngine.syncAdBlockRulesToExtension()
       }
     }
   }
@@ -367,7 +414,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             launch {
               val probed = downloadManager.probeDirectVideoSize(stream.url, stream.toRequestHeaders())
               if (probed > 0L) {
-                geckoEngine.updateDetectedStreamSize(stream.url, probed)
+                chromiumEngine.updateDetectedStreamSize(stream.url, probed)
               }
             }
           }
@@ -378,10 +425,10 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
   private fun observeSavedHtml() {
     viewModelScope.launch {
-      geckoEngine.savedHtmlResult.collect { pair ->
+      chromiumEngine.savedHtmlResult.collect { pair ->
         if (pair != null) {
           val (title, html) = pair
-          geckoEngine.consumeSavedHtmlResult()
+          chromiumEngine.consumeSavedHtmlResult()
           val res = UrlUtils.savePageHtmlLocally(app, title, html)
           _statusMessage.value = res.fold(
             onSuccess = { "Saved offline copy: ${it.name}" },
@@ -392,10 +439,15 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
   }
 
+  /**
+   * Battery-safe performance telemetry loop: runs ONLY while ZenithFox Browser is
+   * actively in the foreground! Completely halted in background / sleep -> 0% overnight drain.
+   */
   private fun startPerformanceStatsLoop() {
-    viewModelScope.launch(Dispatchers.Default) {
-      while (isActive) {
-        val activeSessions = geckoEngine.activeSessionCount()
+    if (perfStatsJob?.isActive == true) return
+    perfStatsJob = viewModelScope.launch(Dispatchers.Default) {
+      while (isActive && isAppInForeground) {
+        val activeSessions = chromiumEngine.activeSessionCount()
         val totalTabs = _tabs.value.size
         val suspended = (totalTabs - activeSessions).coerceAtLeast(0)
         _performanceStats.value = perfMonitor.captureStats(
@@ -403,29 +455,37 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
           suspendedSessions = suspended,
           gpuRendererFromWebGl = videoTelemetry.value.gpuRenderer
         )
-        delay(2500L)
+        delay(3000L)
       }
     }
   }
 
-  fun getSessionForTab(tab: BrowserTab): GeckoSession {
-    val session = geckoEngine.getOrCreateSession(
+  private fun stopPerformanceStatsLoop() {
+    perfStatsJob?.cancel()
+    perfStatsJob = null
+  }
+
+  fun getWebViewForTab(tab: BrowserTab): WebView {
+    val webView = chromiumEngine.getOrCreateWebView(
       tabId = tab.id,
       isPrivate = tab.isPrivate,
       isDesktopMode = tab.isDesktopMode,
       listener = sessionListener
     )
-    if (tab.isSuspended && tab.url.startsWith("http")) {
-      updateTab(tab.id) { it.copy(isSuspended = false) }
-      session.loadUri(tab.url)
+    val currentLoadedUrl = runCatching { webView.url }.getOrNull().orEmpty()
+    val needsReload = tab.url.startsWith("http") &&
+      (tab.isSuspended || currentLoadedUrl.isBlank() || currentLoadedUrl == "about:blank")
+    if (needsReload) {
+      updateTab(tab.id) { it.copy(isSuspended = false, lastAccessedAt = System.currentTimeMillis()) }
+      chromiumEngine.loadUrl(tab.id, tab.url)
     }
     val maxSessions = when (settings.value.performanceProfile) {
       PerformanceProfile.BATTERY_SAVER -> 1
       PerformanceProfile.BALANCED -> 3
-      PerformanceProfile.PERFORMANCE -> 6
+      PerformanceProfile.PERFORMANCE -> 5
     }
-    geckoEngine.suspendInactiveSessions(tab.id, maxSessions)
-    return session
+    chromiumEngine.suspendInactiveSessions(tab.id, maxSessions)
+    return webView
   }
 
   fun createNewTab(url: String = "", isPrivate: Boolean = false, groupName: String = "Default"): String {
@@ -437,13 +497,14 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
       isPrivate = isPrivate,
       groupName = groupName,
       isDesktopMode = settings.value.defaultDesktopMode,
-      isSuspended = false
+      isSuspended = false,
+      lastAccessedAt = System.currentTimeMillis()
     )
     _tabs.update { it + newTab }
     _activeTabId.value = id
     if (url.startsWith("http")) {
-      val session = getSessionForTab(newTab)
-      session.loadUri(url)
+      getWebViewForTab(newTab)
+      chromiumEngine.loadUrl(id, url)
     }
     persistOpenTabs()
     return id
@@ -453,22 +514,23 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     val target = _tabs.value.find { it.id == tabId } ?: return
     val prevId = _activeTabId.value
     if (prevId != tabId && prevId.isNotBlank()) {
-      // Pause media & deactivate previous session so audio doesn't bleed into the newly selected tab/home
-      geckoEngine.sendVideoControl("PAUSE")
-      geckoEngine.deactivateSession(prevId)
+      chromiumEngine.sendVideoControl("PAUSE")
+      chromiumEngine.deactivateSession(prevId)
     }
     _activeTabId.value = tabId
     _isForceFullScreen.value = false
     _isWebFullScreen.value = false
-    geckoEngine.resetVideoTelemetry()
-    geckoEngine.clearDetectedStreams()
+    chromiumEngine.exitFullscreen()
+    chromiumEngine.resetVideoTelemetry()
+    chromiumEngine.clearDetectedStreams()
     _hlsVariantsByUrl.value = emptyMap()
     updateTab(tabId) { it.copy(lastAccessedAt = System.currentTimeMillis()) }
+    persistOpenTabs()
   }
 
   fun closeTab(tabId: String) {
     val target = _tabs.value.find { it.id == tabId } ?: return
-    geckoEngine.closeSession(tabId)
+    chromiumEngine.closeSession(tabId)
     if (!target.isPrivate && target.url.startsWith("http")) {
       _recentlyClosedTabs.update { (listOf(target) + it).take(12) }
     }
@@ -487,7 +549,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
   fun closeAllTabs(privateOnly: Boolean) {
     val toClose = _tabs.value.filter { if (privateOnly) it.isPrivate else !it.isPrivate }
-    toClose.forEach { geckoEngine.closeSession(it.id) }
+    toClose.forEach { chromiumEngine.closeSession(it.id) }
     val remaining = _tabs.value.filterNot { if (privateOnly) it.isPrivate else !it.isPrivate }
     if (remaining.isEmpty()) {
       _tabs.value = emptyList()
@@ -521,23 +583,29 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
       goHome()
       return
     }
-    updateTab(current.id) {
-      it.copy(url = normalized, title = UrlUtils.displayHostOrUrl(normalized), isLoading = true, progress = 5)
-    }
-    val session = getSessionForTab(current.copy(url = normalized))
-    session.loadUri(normalized)
+    val updated = current.copy(
+      url = normalized,
+      title = UrlUtils.displayHostOrUrl(normalized),
+      isLoading = true,
+      progress = 5,
+      isSuspended = false,
+      lastAccessedAt = System.currentTimeMillis()
+    )
+    updateTab(current.id) { updated }
+    getWebViewForTab(updated)
+    chromiumEngine.loadUrl(current.id, normalized)
     persistOpenTabs()
   }
 
   fun goHome() {
     val current = activeTab.value ?: return
-    // Immediately stop & close the live GeckoSession so the webpage & video audio STOP 100% when going Home!
-    geckoEngine.sendVideoControl("PAUSE")
-    geckoEngine.closeSession(current.id)
+    chromiumEngine.sendVideoControl("PAUSE")
+    chromiumEngine.exitFullscreen()
+    chromiumEngine.closeSession(current.id)
     _isForceFullScreen.value = false
     _isWebFullScreen.value = false
-    geckoEngine.resetVideoTelemetry()
-    geckoEngine.clearDetectedStreams()
+    chromiumEngine.resetVideoTelemetry()
+    chromiumEngine.clearDetectedStreams()
     _hlsVariantsByUrl.value = emptyMap()
     updateTab(current.id) {
       it.copy(
@@ -555,9 +623,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
   fun goBack(): Boolean {
     val current = activeTab.value ?: return false
     if (current.isHomePage) return false
-    val session = geckoEngine.getExistingSession(current.id)
-    return if (session != null && current.canGoBack) {
-      session.goBack()
+    val wv = chromiumEngine.getExistingWebView(current.id)
+    return if (wv != null && wv.canGoBack()) {
+      wv.goBack()
       true
     } else {
       goHome()
@@ -567,20 +635,21 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
   fun goForward() {
     val current = activeTab.value ?: return
-    geckoEngine.getExistingSession(current.id)?.goForward()
+    val wv = chromiumEngine.getExistingWebView(current.id) ?: return
+    if (wv.canGoForward()) wv.goForward()
   }
 
   fun reloadOrStop() {
     val current = activeTab.value ?: return
-    val session = geckoEngine.getExistingSession(current.id) ?: return
-    if (current.isLoading) session.stop() else session.reload()
+    val wv = chromiumEngine.getExistingWebView(current.id) ?: return
+    if (current.isLoading) wv.stopLoading() else wv.reload()
   }
 
   fun toggleDesktopMode() {
     val current = activeTab.value ?: return
     val next = !current.isDesktopMode
     updateTab(current.id) { it.copy(isDesktopMode = next) }
-    geckoEngine.setSessionDesktopMode(current.id, next)
+    chromiumEngine.setSessionDesktopMode(current.id, next)
     val host = UrlUtils.extractHost(current.url)
     if (host.isNotEmpty() && !current.isPrivate) {
       updateSiteSetting(host) { it.copy(desktopMode = next) }
@@ -589,18 +658,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
   fun findInPage(query: String, backward: Boolean = false) {
     val current = activeTab.value ?: return
-    val session = geckoEngine.getExistingSession(current.id) ?: return
-    if (query.isBlank()) {
-      session.finder.clear()
-    } else {
-      val flags = if (backward) GeckoSession.FINDER_FIND_BACKWARDS else 0
-      session.finder.find(query, flags)
-    }
+    chromiumEngine.findInPage(current.id, query, backward)
   }
 
   fun clearFindInPage() {
     val current = activeTab.value ?: return
-    geckoEngine.getExistingSession(current.id)?.finder?.clear()
+    chromiumEngine.clearFindInPage(current.id)
   }
 
   fun translateCurrentPage() {
@@ -611,15 +674,15 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
   }
 
   fun requestReaderMode() {
-    geckoEngine.requestReaderMode()
+    chromiumEngine.requestReaderMode()
   }
 
   fun dismissReaderMode() {
-    geckoEngine.clearReaderArticle()
+    chromiumEngine.clearReaderArticle()
   }
 
   fun saveCurrentWebpage() {
-    geckoEngine.requestPageHtmlSave()
+    chromiumEngine.requestPageHtmlSave()
   }
 
   fun updateSearchQueryForSuggestions(query: String) {
@@ -634,12 +697,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
   }
 
-  // --- Video Scaling, Force Fullscreen, & Anime4K WebGL2 Enhancement ---
+  // --- Video Scaling, Force Fullscreen, & 4K WebGL2 Enhancement ---
 
   fun setScalingMode(mode: VideoScalingMode, customZoomValue: Float = _customZoom.value) {
     _scalingMode.value = mode
     _customZoom.value = customZoomValue.coerceIn(0.5f, 3.0f)
-    geckoEngine.sendScalingMode(mode, _customZoom.value)
+    chromiumEngine.sendScalingMode(mode, _customZoom.value)
     val host = UrlUtils.extractHost(activeTab.value?.url.orEmpty())
     if (host.isNotEmpty()) {
       updateSiteSetting(host) { it.copy(scalingMode = mode.name, customZoom = _customZoom.value) }
@@ -648,15 +711,15 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
   fun setForceFullscreen(enabled: Boolean, hideSiteControls: Boolean = true) {
     _isForceFullScreen.value = enabled
-    geckoEngine.sendForceFullscreen(enabled, hideSiteControls)
+    chromiumEngine.sendForceFullscreen(enabled, hideSiteControls)
   }
 
   fun exitAnyFullscreen() {
     if (_isForceFullScreen.value) {
       setForceFullscreen(false, false)
     }
-    if (_isWebFullScreen.value) {
-      activeTab.value?.let { geckoEngine.getExistingSession(it.id)?.exitFullScreen() }
+    if (_isWebFullScreen.value || fullscreenCustomView.value != null) {
+      chromiumEngine.exitFullscreen()
       _isWebFullScreen.value = false
     }
   }
@@ -672,7 +735,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
       splitPosition = current.splitPosition
     )
     _enhancementConfig.value = cfg
-    geckoEngine.sendEnhancementConfig(cfg)
+    chromiumEngine.sendEnhancementConfig(cfg)
     val host = UrlUtils.extractHost(activeTab.value?.url.orEmpty())
     if (host.isNotEmpty()) {
       updateSiteSetting(host) { it.copy(enhancementPreset = preset.name) }
@@ -703,7 +766,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
       raw.copy(enabled = true, preset = EnhancementPreset.CUSTOM)
     }
     _enhancementConfig.value = updated
-    geckoEngine.sendEnhancementConfig(updated)
+    chromiumEngine.sendEnhancementConfig(updated)
   }
 
   fun toggleEnhancementMaster(enabled: Boolean) {
@@ -728,7 +791,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
       )
     }
     _enhancementConfig.value = next
-    geckoEngine.sendEnhancementConfig(next)
+    chromiumEngine.sendEnhancementConfig(next)
   }
 
   fun toggleFrameGeneration(enabled: Boolean) {
@@ -747,22 +810,22 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
       current.copy(frameGenEnabled = enabled)
     }
     _enhancementConfig.value = next
-    geckoEngine.sendEnhancementConfig(next)
+    chromiumEngine.sendEnhancementConfig(next)
   }
 
   fun setTargetFps(fps: Int) {
     val clamped = fps.coerceIn(30, 120)
     val next = _enhancementConfig.value.copy(targetFps = clamped)
     _enhancementConfig.value = next
-    geckoEngine.sendEnhancementConfig(next)
+    chromiumEngine.sendEnhancementConfig(next)
   }
 
-  fun videoTogglePlay() = geckoEngine.sendVideoControl("TOGGLE_PLAY")
-  fun videoSeekBy(seconds: Double) = geckoEngine.sendVideoControl("SEEK_BY", seconds = seconds)
-  fun videoSeekTo(seconds: Double) = geckoEngine.sendVideoControl("SEEK_TO", seconds = seconds)
-  fun videoSetSpeed(speed: Float) = geckoEngine.sendVideoControl("SET_SPEED", speed = speed)
-  fun videoToggleMute() = geckoEngine.sendVideoControl("TOGGLE_MUTE")
-  fun videoToggleSubtitles() = geckoEngine.sendVideoControl("TOGGLE_SUBTITLES")
+  fun videoTogglePlay() = chromiumEngine.sendVideoControl("TOGGLE_PLAY")
+  fun videoSeekBy(seconds: Double) = chromiumEngine.sendVideoControl("SEEK_BY", seconds = seconds)
+  fun videoSeekTo(seconds: Double) = chromiumEngine.sendVideoControl("SEEK_TO", seconds = seconds)
+  fun videoSetSpeed(speed: Float) = chromiumEngine.sendVideoControl("SET_SPEED", speed = speed)
+  fun videoToggleMute() = chromiumEngine.sendVideoControl("TOGGLE_MUTE")
+  fun videoToggleSubtitles() = chromiumEngine.sendVideoControl("TOGGLE_SUBTITLES")
 
   // --- Bookmarks, History, Shortcuts ---
 
@@ -913,7 +976,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
   }
 
   fun toggleExtension(extensionId: String, enable: Boolean) {
-    geckoEngine.toggleExtension(extensionId, enable)
+    chromiumEngine.toggleExtension(extensionId, enable)
   }
 
   fun updateSettings(transform: (BrowserSettings) -> BrowserSettings) {
@@ -931,7 +994,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
   fun clearBrowsingData(history: Boolean, cookies: Boolean, cache: Boolean, siteData: Boolean) {
     viewModelScope.launch {
       if (history) db.historyDao().clearAll()
-      geckoEngine.clearBrowserData(cookies, cache, siteData)
+      chromiumEngine.clearBrowserData(cookies, cache, siteData)
       _statusMessage.value = "Selected browsing data cleared"
     }
   }
@@ -939,22 +1002,17 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
   fun resolvePendingSitePermission(allow: Boolean, remember: Boolean) {
     val pending = _pendingSitePermission.value ?: return
     _pendingSitePermission.value = null
-    pending.geckoResult.complete(
-      if (allow) GeckoSession.PermissionDelegate.ContentPermission.VALUE_ALLOW
-      else GeckoSession.PermissionDelegate.ContentPermission.VALUE_DENY
-    )
-    if (remember && pending.host.isNotBlank()) {
+    pending.onResolve(allow, remember)
+    if (remember && pending.host.isNotBlank() && pending.isGeolocation) {
       val value = if (allow) "ALLOW" else "DENY"
-      if (pending.permissionType == GeckoSession.PermissionDelegate.PERMISSION_GEOLOCATION) {
-        updateSiteSetting(pending.host) { it.copy(locationPermission = value) }
-      }
+      updateSiteSetting(pending.host) { it.copy(locationPermission = value) }
     }
   }
 
   fun resolvePendingAndroidPermission(granted: Boolean) {
     val pending = _pendingAndroidPermission.value ?: return
     _pendingAndroidPermission.value = null
-    if (granted) pending.callback.grant() else pending.callback.reject()
+    pending.onResult(granted)
   }
 
   fun shareUrl(context: Context, title: String, url: String) {
@@ -982,43 +1040,45 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
   }
 
-  // --- App Lifecycle & PiP Surface Recovery (prevents black screen on minimize/resume!) ---
+  // --- App Lifecycle, Battery Saver & Zero-Black-Screen Recovery ---
+
   fun onAppForegrounded() {
+    isAppInForeground = true
+    startPerformanceStatsLoop()
     val current = activeTab.value ?: return
     if (!current.isHomePage) {
-      geckoEngine.reactivateSession(current.id)
+      val existing = chromiumEngine.getExistingWebView(current.id)
+      if (existing != null) {
+        chromiumEngine.reactivateSession(current.id)
+        val loadedUrl = runCatching { existing.url }.getOrNull().orEmpty()
+        if ((loadedUrl.isBlank() || loadedUrl == "about:blank") && current.url.startsWith("http")) {
+          chromiumEngine.loadUrl(current.id, current.url)
+        }
+      } else if (current.url.startsWith("http")) {
+        getWebViewForTab(current)
+      }
     }
   }
 
   fun onAppBackgrounded(inPip: Boolean) {
+    persistOpenTabs(immediate = true)
     if (inPip) return
-    val current = activeTab.value ?: return
-    if (!current.isHomePage) {
-      // Gently pause non-PiP background audio without tearing down the active session
-      geckoEngine.sendVideoControl("PAUSE")
+    isAppInForeground = false
+    stopPerformanceStatsLoop()
+    val current = activeTab.value
+    if (current != null && !current.isHomePage) {
+      chromiumEngine.sendVideoControl("PAUSE")
     }
+    // Freeze ALL WebViews & Chromium timers so background/overnight battery usage drops to ~0%!
+    chromiumEngine.pauseAllWebViews()
   }
 
   // --- Video Player Essential Quick Controls ---
-  fun toggleVideoPlayPause() {
-    geckoEngine.sendVideoControl("TOGGLE_PLAY")
-  }
-
-  fun seekVideoBy(seconds: Double) {
-    geckoEngine.sendVideoControl("SEEK_BY", seconds = seconds)
-  }
-
-  fun setVideoPlaybackSpeed(speed: Float) {
-    geckoEngine.sendVideoControl("SET_SPEED", speed = speed)
-  }
-
-  fun toggleVideoMute() {
-    geckoEngine.sendVideoControl("TOGGLE_MUTE")
-  }
-
-  fun toggleVideoSubtitles() {
-    geckoEngine.sendVideoControl("TOGGLE_SUBTITLES")
-  }
+  fun toggleVideoPlayPause() = chromiumEngine.sendVideoControl("TOGGLE_PLAY")
+  fun seekVideoBy(seconds: Double) = chromiumEngine.sendVideoControl("SEEK_BY", seconds = seconds)
+  fun setVideoPlaybackSpeed(speed: Float) = chromiumEngine.sendVideoControl("SET_SPEED", speed = speed)
+  fun toggleVideoMute() = chromiumEngine.sendVideoControl("TOGGLE_MUTE")
+  fun toggleVideoSubtitles() = chromiumEngine.sendVideoControl("TOGGLE_SUBTITLES")
 
   // --- Built-In GitHub Releases APK Auto-Updater ---
   fun checkForUpdates(manual: Boolean = false) {
@@ -1118,8 +1178,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         frameGenEnabled = if (isBatterySaver || effectivePreset == EnhancementPreset.OFF) false else currentCfg.frameGenEnabled,
         targetFps = currentCfg.targetFps
       )
-      geckoEngine.sendScalingMode(mode, zoom)
-      geckoEngine.sendEnhancementConfig(_enhancementConfig.value)
+      chromiumEngine.sendScalingMode(mode, zoom)
+      chromiumEngine.sendEnhancementConfig(_enhancementConfig.value)
     }
   }
 
@@ -1142,8 +1202,14 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
   }
 
-  private fun persistOpenTabs() {
-    viewModelScope.launch {
+  /**
+   * Serialized & debounced tab persistence so concurrent onLocationChanged/onTitleChanged
+   * callbacks NEVER race clearAll()+upsertAll() and accidentally wipe out the user's open websites!
+   */
+  private fun persistOpenTabs(immediate: Boolean = false) {
+    persistTabsJob?.cancel()
+    persistTabsJob = viewModelScope.launch(Dispatchers.IO) {
+      if (!immediate) delay(160L)
       val nonPrivate = _tabs.value.filter { !it.isPrivate }.map {
         SavedTabEntity(
           id = it.id,

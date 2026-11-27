@@ -167,6 +167,37 @@ class AdBlockEngine(
     return false
   }
 
+  /**
+   * Decides whether to block an ad/tracker/malicious subresource (script, image, XHR, iframe)
+   * intercepted by Chromium WebViewClient.shouldInterceptRequest before bytes download.
+   */
+  fun shouldBlockSubresource(targetUrl: String, currentPageUrl: String?): Boolean {
+    if (!isEnabled) return false
+    val pageHost = extractHost(currentPageUrl).ifEmpty { currentPageUrl?.lowercase().orEmpty() }
+    if (pageHost.isNotEmpty() && isHostWhitelisted(pageHost)) return false
+
+    val targetHost = extractHost(targetUrl)
+    if (targetHost.isEmpty()) return false
+    if (pageHost.isNotEmpty() && sameRootDomain(pageHost, targetHost)) return false
+
+    if (matchesSet(targetHost, maliciousDomains)) {
+      recordBlocked(targetHost, pageHost, "malicious")
+      return true
+    }
+
+    if (matchesSet(targetHost, builtInAdAndTrackerDomains) || matchesCustomRules(targetHost)) {
+      recordBlocked(targetHost, pageHost, "ad_network")
+      return true
+    }
+
+    if (suspiciousRedirectUrlRegex.containsMatchIn(targetUrl)) {
+      recordBlocked(targetHost, pageHost, "ad_script")
+      return true
+    }
+
+    return false
+  }
+
   fun recordBlocked(domain: String, pageHost: String, resourceType: String) {
     val count = totalBlockedCounter.incrementAndGet()
     _totalBlockedCount.value = count

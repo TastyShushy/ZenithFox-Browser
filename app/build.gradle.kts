@@ -16,19 +16,14 @@ android {
     applicationId = "com.aistudio.animebrowser.k7v9xm"
     minSdk = 24
     targetSdk = 36
-    versionCode = 9
-    versionName = "1.7.1"
+    versionCode = 10
+    versionName = "2.0.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-    ndk {
-      abiFilters += listOf("arm64-v8a")
-    }
   }
 
   packaging {
     jniLibs {
-      // Compresses libxul.so & native libraries inside APK (~60% smaller APK)
       useLegacyPackaging = true
     }
   }
@@ -117,7 +112,8 @@ dependencies {
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
-  implementation(libs.mozilla.geckoview)
+  // implementation(libs.mozilla.geckoview)
+  implementation(libs.androidx.webkit)
   implementation(libs.zxing.core)
   // implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)

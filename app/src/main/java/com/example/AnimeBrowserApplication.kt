@@ -6,7 +6,7 @@ import com.example.data.db.AnimeBrowserDatabase
 import com.example.data.db.CustomShortcutEntity
 import com.example.data.prefs.BrowserPreferencesRepository
 import com.example.downloads.BrowserDownloadManager
-import com.example.engine.GeckoEngineManager
+import com.example.engine.ChromiumEngineManager
 import com.example.engine.PerformanceMonitor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,8 +45,8 @@ class AnimeBrowserApplication : Application() {
     PerformanceMonitor(this)
   }
 
-  val geckoEngine: GeckoEngineManager by lazy {
-    GeckoEngineManager(this, adBlockEngine)
+  val chromiumEngine: ChromiumEngineManager by lazy {
+    ChromiumEngineManager(this, adBlockEngine)
   }
 
   override fun onCreate() {

@@ -10,7 +10,11 @@ import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.webkit.WebView
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -25,7 +29,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -52,6 +55,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -60,6 +64,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.model.ToolbarPosition
+import com.example.engine.TaskCleanupService
 import com.example.engine.UrlUtils
 import com.example.ui.components.AppUpdateDialog
 import com.example.ui.components.BrowserAddressBar
@@ -90,7 +95,6 @@ import com.example.viewmodel.BrowserViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import org.mozilla.geckoview.GeckoView
 
 class MainActivity : ComponentActivity() {
 
@@ -99,7 +103,7 @@ class MainActivity : ComponentActivity() {
   private val _isInPipMode = MutableStateFlow(false)
   private val isInPipMode: StateFlow<Boolean> = _isInPipMode.asStateFlow()
 
-  private var activeGeckoView: GeckoView? = null
+  private var activeWebView: WebView? = null
   private var canAutoEnterPip: Boolean = false
   private var lastVideoWidth: Int = 16
   private var lastVideoHeight: Int = 9
@@ -107,16 +111,20 @@ class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
+    applyPreferredRefreshRate(60f)
+    // Start lightweight task-removal watcher so swiping away from Recents stops all background work immediately
+    runCatching { startService(Intent(this, TaskCleanupService::class.java)) }
     handleIncomingBrowserIntent(intent)
 
     setContent {
       AnimeBrowserRoot(
         viewModel = viewModel,
         isInPipModeFlow = isInPipMode,
-        onRegisterGeckoView = { view -> activeGeckoView = view },
+        onRegisterWebView = { wv -> activeWebView = wv },
         onToggleFullscreenWindow = ::applyImmersiveFullscreen,
         onToggleOrientation = ::toggleOrientation,
         onKeepScreenAwake = ::setKeepScreenAwake,
+        onUpdatePreferredRefreshRate = ::applyPreferredRefreshRate,
         onEnterPip = ::tryEnterPipMode,
         onUpdatePipParams = ::updatePipParams
       )
@@ -125,20 +133,28 @@ class MainActivity : ComponentActivity() {
 
   override fun onResume() {
     super.onResume()
-    // Re-activate GeckoSession and force a clean surface repaint so returning from
-    // background minimize or Picture-in-Picture NEVER leaves a stuck black screen!
     viewModel.onAppForegrounded()
-    refreshGeckoSurface()
+    refreshWebViewSurface()
   }
 
   override fun onStop() {
     super.onStop()
+    if (!_isInPipMode.value) {
+      // Never hold FLAG_KEEP_SCREEN_ON when backgrounded (prevents accidental overnight screen/battery drain)
+      setKeepScreenAwake(false)
+    }
     viewModel.onAppBackgrounded(inPip = _isInPipMode.value)
+  }
+
+  override fun onDestroy() {
+    super.onDestroy()
+    if (isFinishing) {
+      (application as? AnimeBrowserApplication)?.chromiumEngine?.shutdownAllSessions()
+    }
   }
 
   override fun onUserLeaveHint() {
     super.onUserLeaveHint()
-    // Android 8.0–11 fallback for automatic Picture-in-Picture when user minimizes while watching video
     if (Build.VERSION.SDK_INT in Build.VERSION_CODES.O until Build.VERSION_CODES.S && canAutoEnterPip) {
       tryEnterPipMode(silent = true)
     }
@@ -151,11 +167,9 @@ class MainActivity : ComponentActivity() {
     super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
     _isInPipMode.value = isInPictureInPictureMode
     if (!isInPictureInPictureMode) {
-      // Returning from PiP to full app window — reactivate session & repaint surface cleanly
       viewModel.onAppForegrounded()
-      refreshGeckoSurface()
+      refreshWebViewSurface()
     } else {
-      // Inside PiP: keep GeckoSession active so playback continues smoothly in the pop-up window
       viewModel.onAppForegrounded()
     }
   }
@@ -165,11 +179,27 @@ class MainActivity : ComponentActivity() {
     handleIncomingBrowserIntent(intent)
   }
 
-  private fun refreshGeckoSurface() {
-    activeGeckoView?.let { gv ->
-      gv.post {
-        gv.requestLayout()
-        gv.invalidate()
+  /**
+   * Prefers 60 Hz display refresh rate by default to save OLED & GPU power;
+   * automatically unlocks 90/120 Hz only when the user actively enables >60 FPS Frame Generation.
+   */
+  private fun applyPreferredRefreshRate(targetHz: Float) {
+    runCatching {
+      val attrs = window.attributes
+      if (attrs.preferredRefreshRate != targetHz) {
+        attrs.preferredRefreshRate = targetHz
+        window.attributes = attrs
+      }
+    }
+  }
+
+  private fun refreshWebViewSurface() {
+    activeWebView?.let { wv ->
+      wv.post {
+        wv.resumeTimers()
+        wv.onResume()
+        wv.requestLayout()
+        wv.invalidate()
       }
     }
   }
@@ -219,10 +249,6 @@ class MainActivity : ComponentActivity() {
     }
   }
 
-  /**
-   * Computes a safe Android Picture-in-Picture Rational aspect ratio strictly clamped
-   * inside Android's required [0.42 .. 2.38] bounds so ultrawide or vertical videos never crash.
-   */
   private fun safePipAspectRatio(width: Int, height: Int): Rational {
     val w = if (width > 0) width else 16
     val h = if (height > 0) height else 9
@@ -275,10 +301,11 @@ class MainActivity : ComponentActivity() {
 private fun AnimeBrowserRoot(
   viewModel: BrowserViewModel,
   isInPipModeFlow: StateFlow<Boolean>,
-  onRegisterGeckoView: (GeckoView?) -> Unit,
+  onRegisterWebView: (WebView?) -> Unit,
   onToggleFullscreenWindow: (fullscreen: Boolean, autoLandscape: Boolean) -> Unit,
   onToggleOrientation: () -> Unit,
   onKeepScreenAwake: (Boolean) -> Unit,
+  onUpdatePreferredRefreshRate: (Float) -> Unit,
   onEnterPip: () -> Unit,
   onUpdatePipParams: (canAutoEnter: Boolean, videoWidth: Int, videoHeight: Int) -> Unit
 ) {
@@ -307,6 +334,8 @@ private fun AnimeBrowserRoot(
   val customZoom by viewModel.customZoom.collectAsStateWithLifecycle()
   val isWebFullScreen by viewModel.isWebFullScreen.collectAsStateWithLifecycle()
   val isForceFullScreen by viewModel.isForceFullScreen.collectAsStateWithLifecycle()
+  val fullscreenCustomView by viewModel.fullscreenCustomView.collectAsStateWithLifecycle()
+  val webViewGeneration by viewModel.webViewGeneration.collectAsStateWithLifecycle()
   val extensions by viewModel.extensions.collectAsStateWithLifecycle()
   val suggestions by viewModel.searchSuggestions.collectAsStateWithLifecycle()
   val perfStats by viewModel.performanceStats.collectAsStateWithLifecycle()
@@ -330,10 +359,9 @@ private fun AnimeBrowserRoot(
   var showQrDialog by remember { mutableStateOf(false) }
 
   val snackbarHostState = remember { SnackbarHostState() }
-  val isAnyFullscreen = isWebFullScreen || isForceFullScreen
+  val isAnyFullscreen = isWebFullScreen || isForceFullScreen || fullscreenCustomView != null
   val hideBrowserChrome = isAnyFullscreen || isInPipMode
 
-  // Runtime Android Permission Launcher bridged to GeckoView PermissionDelegate
   val androidPermissionLauncher = rememberLauncherForActivityResult(
     contract = ActivityResultContracts.RequestMultiplePermissions()
   ) { resultMap ->
@@ -357,7 +385,16 @@ private fun AnimeBrowserRoot(
     onKeepScreenAwake(videoTelemetry.isPlaying && settings.keepScreenAwakeVideo)
   }
 
-  // Keep Android Picture-in-Picture auto-enter parameters synced with live playing video state!
+  // Keep display at power-efficient 60 Hz by default; only request >60 Hz when Frame Gen target > 60 FPS
+  LaunchedEffect(enhancementConfig.frameGenEnabled, enhancementConfig.targetFps, videoTelemetry.isPlaying) {
+    val desiredHz = if (enhancementConfig.frameGenEnabled && videoTelemetry.isPlaying && enhancementConfig.targetFps > 60) {
+      enhancementConfig.targetFps.toFloat()
+    } else {
+      60f
+    }
+    onUpdatePreferredRefreshRate(desiredHz)
+  }
+
   LaunchedEffect(
     currentRoute,
     activeTab?.isHomePage,
@@ -375,7 +412,6 @@ private fun AnimeBrowserRoot(
     onUpdatePipParams(canAutoPip, videoTelemetry.videoWidth, videoTelemetry.videoHeight)
   }
 
-  // Close transient sheets cleanly when entering PiP so the pop-up shows pure video
   LaunchedEffect(isInPipMode) {
     if (isInPipMode) {
       showMenuSheet = false
@@ -408,7 +444,6 @@ private fun AnimeBrowserRoot(
     }
   }
 
-  // Handle back press when in fullscreen or browsing web pages
   BackHandler(enabled = currentRoute == BrowserScreenRoute.BROWSER && (isAnyFullscreen || showFindInPage || activeTab?.isHomePage == false)) {
     when {
       isAnyFullscreen -> viewModel.exitAnyFullscreen()
@@ -433,139 +468,116 @@ private fun AnimeBrowserRoot(
     isPrivateMode = activeTab?.isPrivate == true
   ) {
     Box(modifier = Modifier.fillMaxSize()) {
-    when (currentRoute) {
-      BrowserScreenRoute.TABS -> TabSwitcherScreen(
-        tabs = tabs,
-        activeTabId = activeTabId,
-        recentlyClosedTabs = recentlyClosedTabs,
-        performanceStats = perfStats,
-        onSelectTab = viewModel::selectTab,
-        onCloseTab = viewModel::closeTab,
-        onNewTab = { isPriv, grp -> viewModel.createNewTab(url = "", isPrivate = isPriv, groupName = grp) },
-        onRestoreClosed = viewModel::restoreRecentlyClosedTab,
-        onCloseAll = viewModel::closeAllTabs,
-        onAssignGroup = viewModel::setTabGroup,
-        onBack = { currentRoute = BrowserScreenRoute.BROWSER }
-      )
+      when (currentRoute) {
+        BrowserScreenRoute.TABS -> TabSwitcherScreen(
+          tabs = tabs,
+          activeTabId = activeTabId,
+          recentlyClosedTabs = recentlyClosedTabs,
+          performanceStats = perfStats,
+          onSelectTab = viewModel::selectTab,
+          onCloseTab = viewModel::closeTab,
+          onNewTab = { isPriv, grp -> viewModel.createNewTab(url = "", isPrivate = isPriv, groupName = grp) },
+          onRestoreClosed = viewModel::restoreRecentlyClosedTab,
+          onCloseAll = viewModel::closeAllTabs,
+          onAssignGroup = viewModel::setTabGroup,
+          onBack = { currentRoute = BrowserScreenRoute.BROWSER }
+        )
 
-      BrowserScreenRoute.BOOKMARKS -> BookmarksScreen(
-        bookmarks = bookmarks,
-        onOpenUrl = { viewModel.navigateActiveTab(it) },
-        onAddBookmark = viewModel::addBookmark,
-        onDeleteBookmark = viewModel::deleteBookmark,
-        onBack = { currentRoute = BrowserScreenRoute.BROWSER }
-      )
+        BrowserScreenRoute.BOOKMARKS -> BookmarksScreen(
+          bookmarks = bookmarks,
+          onOpenUrl = { viewModel.navigateActiveTab(it) },
+          onAddBookmark = viewModel::addBookmark,
+          onDeleteBookmark = viewModel::deleteBookmark,
+          onBack = { currentRoute = BrowserScreenRoute.BROWSER }
+        )
 
-      BrowserScreenRoute.HISTORY -> HistoryScreen(
-        history = history,
-        onOpenUrl = { viewModel.navigateActiveTab(it) },
-        onDeleteItem = viewModel::deleteHistoryItem,
-        onClearAll = viewModel::clearHistory,
-        onBack = { currentRoute = BrowserScreenRoute.BROWSER }
-      )
+        BrowserScreenRoute.HISTORY -> HistoryScreen(
+          history = history,
+          onOpenUrl = { viewModel.navigateActiveTab(it) },
+          onDeleteItem = viewModel::deleteHistoryItem,
+          onClearAll = viewModel::clearHistory,
+          onBack = { currentRoute = BrowserScreenRoute.BROWSER }
+        )
 
-      BrowserScreenRoute.DOWNLOADS -> DownloadsScreen(
-        downloads = downloads,
-        downloadSubfolder = settings.downloadSubfolder,
-        onStartManualDownload = { viewModel.startDownload(it) },
-        onCancelDownload = viewModel::cancelDownload,
-        onRetryDownload = viewModel::retryDownload,
-        onOpenDownload = viewModel::openDownload,
-        onDeleteDownload = viewModel::deleteDownload,
-        onBack = { currentRoute = BrowserScreenRoute.BROWSER }
-      )
+        BrowserScreenRoute.DOWNLOADS -> DownloadsScreen(
+          downloads = downloads,
+          downloadSubfolder = settings.downloadSubfolder,
+          onStartManualDownload = { viewModel.startDownload(it) },
+          onCancelDownload = viewModel::cancelDownload,
+          onRetryDownload = viewModel::retryDownload,
+          onOpenDownload = viewModel::openDownload,
+          onDeleteDownload = viewModel::deleteDownload,
+          onBack = { currentRoute = BrowserScreenRoute.BROWSER }
+        )
 
-      BrowserScreenRoute.EXTENSIONS -> ExtensionsScreen(
-        extensions = extensions,
-        onToggleExtension = viewModel::toggleExtension,
-        onOpenEnhancer = {
-          currentRoute = BrowserScreenRoute.BROWSER
-          showEnhancerSheet = true
-        },
-        onOpenDownloader = {
-          currentRoute = BrowserScreenRoute.BROWSER
-          showVideoDownloaderSheet = true
-        },
-        onOpenPrivacy = { currentRoute = BrowserScreenRoute.PRIVACY },
-        onBack = { currentRoute = BrowserScreenRoute.BROWSER }
-      )
-
-      BrowserScreenRoute.PRIVACY -> PrivacyDashboardScreen(
-        settings = settings,
-        totalBlockedCount = totalBlockedCount,
-        recentBlocked = recentBlocked,
-        customRules = customBlockRules,
-        whitelistedHosts = whitelistedHosts,
-        currentHost = UrlUtils.extractHost(activeTab?.url.orEmpty()),
-        onUpdateSettings = viewModel::updateSettings,
-        onAddCustomRule = viewModel::addCustomBlockDomain,
-        onRemoveCustomRule = viewModel::removeCustomBlockDomain,
-        onToggleWhitelist = viewModel::toggleHostWhitelist,
-        onClearBrowsingData = viewModel::clearBrowsingData,
-        onBack = { currentRoute = BrowserScreenRoute.BROWSER }
-      )
-
-      BrowserScreenRoute.SITE_PERMISSIONS -> SitePermissionsScreen(
-        siteSettings = siteSettings,
-        onUpdateSite = viewModel::updateSitePermission,
-        onDeleteSite = viewModel::deleteSiteSetting,
-        onBack = { currentRoute = BrowserScreenRoute.BROWSER }
-      )
-
-      BrowserScreenRoute.SETTINGS -> SettingsScreen(
-        settings = settings,
-        performanceStats = perfStats,
-        onUpdateSettings = viewModel::updateSettings,
-        onOpenPrivacy = { currentRoute = BrowserScreenRoute.PRIVACY },
-        onOpenSitePermissions = { currentRoute = BrowserScreenRoute.SITE_PERMISSIONS },
-        onOpenExtensions = { currentRoute = BrowserScreenRoute.EXTENSIONS },
-        onBack = { currentRoute = BrowserScreenRoute.BROWSER },
-        isCheckingForUpdate = isCheckingForUpdate,
-        onCheckForUpdates = { viewModel.checkForUpdates(manual = true) }
-      )
-
-      BrowserScreenRoute.BROWSER -> {
-        Scaffold(
-          containerColor = MaterialTheme.colorScheme.background,
-          snackbarHost = { if (!isInPipMode) SnackbarHost(snackbarHostState) },
-          topBar = {
-            if (!hideBrowserChrome && settings.toolbarPosition == ToolbarPosition.TOP) {
-              Column(modifier = Modifier.statusBarsPadding()) {
-                BrowserAddressBar(
-                  tab = activeTab,
-                  isBookmarked = isBookmarked,
-                  blockedCount = totalBlockedCount,
-                  adBlockEnabled = settings.adBlockEnabled,
-                  suggestions = suggestions,
-                  onQueryChange = viewModel::updateSearchQueryForSuggestions,
-                  onNavigate = viewModel::navigateActiveTab,
-                  onReloadOrStop = viewModel::reloadOrStop,
-                  onToggleBookmark = viewModel::toggleBookmarkForActiveTab,
-                  onOpenPrivacy = { currentRoute = BrowserScreenRoute.PRIVACY }
-                )
-                AnimatedVisibility(visible = showFindInPage) {
-                  FindInPageBar(
-                    query = findQuery,
-                    onQueryChange = {
-                      findQuery = it
-                      viewModel.findInPage(it)
-                    },
-                    onFindPrev = { viewModel.findInPage(findQuery, backward = true) },
-                    onFindNext = { viewModel.findInPage(findQuery, backward = false) },
-                    onClose = {
-                      showFindInPage = false
-                      findQuery = ""
-                      viewModel.clearFindInPage()
-                    }
-                  )
-                }
-              }
-            }
+        BrowserScreenRoute.EXTENSIONS -> ExtensionsScreen(
+          extensions = extensions,
+          onToggleExtension = viewModel::toggleExtension,
+          onOpenEnhancer = {
+            currentRoute = BrowserScreenRoute.BROWSER
+            showEnhancerSheet = true
           },
-          bottomBar = {
-            if (!hideBrowserChrome) {
-              Column {
-                if (settings.toolbarPosition == ToolbarPosition.BOTTOM) {
+          onOpenDownloader = {
+            currentRoute = BrowserScreenRoute.BROWSER
+            showVideoDownloaderSheet = true
+          },
+          onOpenPrivacy = { currentRoute = BrowserScreenRoute.PRIVACY },
+          onBack = { currentRoute = BrowserScreenRoute.BROWSER }
+        )
+
+        BrowserScreenRoute.PRIVACY -> PrivacyDashboardScreen(
+          settings = settings,
+          totalBlockedCount = totalBlockedCount,
+          recentBlocked = recentBlocked,
+          customRules = customBlockRules,
+          whitelistedHosts = whitelistedHosts,
+          currentHost = UrlUtils.extractHost(activeTab?.url.orEmpty()),
+          onUpdateSettings = viewModel::updateSettings,
+          onAddCustomRule = viewModel::addCustomBlockDomain,
+          onRemoveCustomRule = viewModel::removeCustomBlockDomain,
+          onToggleWhitelist = viewModel::toggleHostWhitelist,
+          onClearBrowsingData = viewModel::clearBrowsingData,
+          onBack = { currentRoute = BrowserScreenRoute.BROWSER }
+        )
+
+        BrowserScreenRoute.SITE_PERMISSIONS -> SitePermissionsScreen(
+          siteSettings = siteSettings,
+          onUpdateSite = viewModel::updateSitePermission,
+          onDeleteSite = viewModel::deleteSiteSetting,
+          onBack = { currentRoute = BrowserScreenRoute.BROWSER }
+        )
+
+        BrowserScreenRoute.SETTINGS -> SettingsScreen(
+          settings = settings,
+          performanceStats = perfStats,
+          onUpdateSettings = viewModel::updateSettings,
+          onOpenPrivacy = { currentRoute = BrowserScreenRoute.PRIVACY },
+          onOpenSitePermissions = { currentRoute = BrowserScreenRoute.SITE_PERMISSIONS },
+          onOpenExtensions = { currentRoute = BrowserScreenRoute.EXTENSIONS },
+          onBack = { currentRoute = BrowserScreenRoute.BROWSER },
+          isCheckingForUpdate = isCheckingForUpdate,
+          onCheckForUpdates = { viewModel.checkForUpdates(manual = true) }
+        )
+
+        BrowserScreenRoute.BROWSER -> {
+          Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            snackbarHost = { if (!isInPipMode) SnackbarHost(snackbarHostState) },
+            topBar = {
+              if (!hideBrowserChrome && settings.toolbarPosition == ToolbarPosition.TOP) {
+                Column(modifier = Modifier.statusBarsPadding()) {
+                  BrowserAddressBar(
+                    tab = activeTab,
+                    isBookmarked = isBookmarked,
+                    blockedCount = totalBlockedCount,
+                    adBlockEnabled = settings.adBlockEnabled,
+                    suggestions = suggestions,
+                    onQueryChange = viewModel::updateSearchQueryForSuggestions,
+                    onNavigate = viewModel::navigateActiveTab,
+                    onReloadOrStop = viewModel::reloadOrStop,
+                    onToggleBookmark = viewModel::toggleBookmarkForActiveTab,
+                    onOpenPrivacy = { currentRoute = BrowserScreenRoute.PRIVACY }
+                  )
                   AnimatedVisibility(visible = showFindInPage) {
                     FindInPageBar(
                       query = findQuery,
@@ -582,313 +594,396 @@ private fun AnimeBrowserRoot(
                       }
                     )
                   }
-                  BrowserAddressBar(
-                    tab = activeTab,
-                    isBookmarked = isBookmarked,
-                    blockedCount = totalBlockedCount,
-                    adBlockEnabled = settings.adBlockEnabled,
-                    suggestions = suggestions,
-                    onQueryChange = viewModel::updateSearchQueryForSuggestions,
-                    onNavigate = viewModel::navigateActiveTab,
-                    onReloadOrStop = viewModel::reloadOrStop,
-                    onToggleBookmark = viewModel::toggleBookmarkForActiveTab,
-                    onOpenPrivacy = { currentRoute = BrowserScreenRoute.PRIVACY }
-                  )
                 }
-                BrowserBottomNavBar(
-                  canGoBack = activeTab?.canGoBack == true,
-                  canGoForward = activeTab?.canGoForward == true,
-                  tabCount = tabs.size,
-                  isPrivateMode = activeTab?.isPrivate == true,
-                  isHome = activeTab?.isHomePage != false,
-                  onHomeClick = viewModel::goHome,
-                  onBackClick = { viewModel.goBack() },
-                  onForwardClick = viewModel::goForward,
-                  onTabsClick = { currentRoute = BrowserScreenRoute.TABS },
-                  onMenuClick = { showMenuSheet = true }
-                )
               }
-            }
-          }
-        ) { innerPadding ->
-          Box(
-            modifier = Modifier
-              .fillMaxSize()
-              .then(if (hideBrowserChrome) Modifier else Modifier.padding(innerPadding))
-              .background(MaterialTheme.colorScheme.background)
-          ) {
-            val currentTab = activeTab
-            if (currentTab == null || currentTab.isHomePage) {
-              HomeScreen(
-                isPrivateMode = currentTab?.isPrivate == true,
-                searchEngine = settings.searchEngine,
-                enhancementConfig = enhancementConfig,
-                blockedCount = totalBlockedCount,
-                shortcuts = shortcuts,
-                openTabs = tabs,
-                recentlyWatched = recentlyWatched,
-                recentHistory = history,
-                bookmarks = bookmarks,
-                onNavigate = viewModel::navigateActiveTab,
-                onSelectTab = viewModel::selectTab,
-                onAddShortcut = viewModel::addCustomShortcut,
-                onDeleteShortcut = viewModel::deleteShortcut,
-                onOpenEnhancer = { showEnhancerSheet = true },
-                onOpenDownloads = { currentRoute = BrowserScreenRoute.DOWNLOADS },
-                onOpenPrivacy = { currentRoute = BrowserScreenRoute.PRIVACY },
-                onOpenExtensions = { currentRoute = BrowserScreenRoute.EXTENSIONS }
-              )
-            } else {
-              // Real Mozilla GeckoView rendering surface (session memoized by tabId so recompositions NEVER thrash GeckoSession!)
-              GeckoTabWebView(
-                tabId = currentTab.id,
-                getSession = { viewModel.getSessionForTab(currentTab) },
-                onRegisterGeckoView = onRegisterGeckoView,
-                modifier = Modifier.fillMaxSize()
-              )
-
-              // Floating Video Controls & Video Downloader FAB column (hidden during Fullscreen and PiP)
-              if ((videoTelemetry.hasVideo || detectedStreams.isNotEmpty()) && !hideBrowserChrome) {
-                Column(
-                  horizontalAlignment = Alignment.CenterHorizontally,
-                  verticalArrangement = Arrangement.spacedBy(10.dp),
-                  modifier = Modifier
-                    .align(if (settings.floatingButtonOnRight) Alignment.BottomEnd else Alignment.BottomStart)
-                    .padding(18.dp)
-                ) {
-                  if (detectedStreams.isNotEmpty()) {
-                    SmallFloatingActionButton(
-                      onClick = { showVideoDownloaderSheet = true },
-                      shape = CircleShape,
-                      containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                      contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                    ) {
-                      BadgedBox(
-                        badge = {
-                          Badge { Text("${detectedStreams.size}") }
+            },
+            bottomBar = {
+              if (!hideBrowserChrome) {
+                Column {
+                  if (settings.toolbarPosition == ToolbarPosition.BOTTOM) {
+                    AnimatedVisibility(visible = showFindInPage) {
+                      FindInPageBar(
+                        query = findQuery,
+                        onQueryChange = {
+                          findQuery = it
+                          viewModel.findInPage(it)
+                        },
+                        onFindPrev = { viewModel.findInPage(findQuery, backward = true) },
+                        onFindNext = { viewModel.findInPage(findQuery, backward = false) },
+                        onClose = {
+                          showFindInPage = false
+                          findQuery = ""
+                          viewModel.clearFindInPage()
                         }
-                      ) {
-                        Icon(
-                          Icons.Filled.Download,
-                          contentDescription = "Download detected anime video",
-                          modifier = Modifier.size(20.dp)
-                        )
-                      }
+                      )
                     }
-                  }
-                  if (videoTelemetry.hasVideo) {
-                    FloatingVideoControlButton(
-                      telemetry = videoTelemetry,
-                      enhancementConfig = enhancementConfig,
-                      onClick = { showVideoControlPanel = true }
+                    BrowserAddressBar(
+                      tab = activeTab,
+                      isBookmarked = isBookmarked,
+                      blockedCount = totalBlockedCount,
+                      adBlockEnabled = settings.adBlockEnabled,
+                      suggestions = suggestions,
+                      onQueryChange = viewModel::updateSearchQueryForSuggestions,
+                      onNavigate = viewModel::navigateActiveTab,
+                      onReloadOrStop = viewModel::reloadOrStop,
+                      onToggleBookmark = viewModel::toggleBookmarkForActiveTab,
+                      onOpenPrivacy = { currentRoute = BrowserScreenRoute.PRIVACY }
                     )
                   }
+                  BrowserBottomNavBar(
+                    canGoBack = activeTab?.canGoBack == true,
+                    canGoForward = activeTab?.canGoForward == true,
+                    tabCount = tabs.size,
+                    isPrivateMode = activeTab?.isPrivate == true,
+                    isHome = activeTab?.isHomePage != false,
+                    onHomeClick = viewModel::goHome,
+                    onBackClick = { viewModel.goBack() },
+                    onForwardClick = viewModel::goForward,
+                    onTabsClick = { currentRoute = BrowserScreenRoute.TABS },
+                    onMenuClick = { showMenuSheet = true }
+                  )
+                }
+              }
+            }
+          ) { innerPadding ->
+            Box(
+              modifier = Modifier
+                .fillMaxSize()
+                .then(if (hideBrowserChrome) Modifier else Modifier.padding(innerPadding))
+                .background(MaterialTheme.colorScheme.background)
+            ) {
+              val currentTab = activeTab
+              if (currentTab == null || currentTab.isHomePage) {
+                HomeScreen(
+                  isPrivateMode = currentTab?.isPrivate == true,
+                  searchEngine = settings.searchEngine,
+                  enhancementConfig = enhancementConfig,
+                  blockedCount = totalBlockedCount,
+                  shortcuts = shortcuts,
+                  openTabs = tabs,
+                  recentlyWatched = recentlyWatched,
+                  recentHistory = history,
+                  bookmarks = bookmarks,
+                  onNavigate = viewModel::navigateActiveTab,
+                  onSelectTab = viewModel::selectTab,
+                  onAddShortcut = viewModel::addCustomShortcut,
+                  onDeleteShortcut = viewModel::deleteShortcut,
+                  onOpenEnhancer = { showEnhancerSheet = true },
+                  onOpenDownloads = { currentRoute = BrowserScreenRoute.DOWNLOADS },
+                  onOpenPrivacy = { currentRoute = BrowserScreenRoute.PRIVACY },
+                  onOpenExtensions = { currentRoute = BrowserScreenRoute.EXTENSIONS }
+                )
+              } else {
+                // Native Android Chromium WebView host (Blink + V8 + ANGLE GPU)
+                ChromiumTabWebView(
+                  tabId = currentTab.id,
+                  generation = webViewGeneration,
+                  getWebView = { viewModel.getWebViewForTab(currentTab) },
+                  onRegisterWebView = onRegisterWebView,
+                  modifier = Modifier.fillMaxSize()
+                )
+
+                // Native HTML5 Fullscreen Custom View Overlay (when site triggers WebChromeClient.onShowCustomView)
+                fullscreenCustomView?.let { customFsView ->
+                  ChromiumFullscreenCustomViewHost(
+                    customView = customFsView,
+                    modifier = Modifier
+                      .fillMaxSize()
+                      .background(Color.Black)
+                  )
+                }
+
+                // Floating Video Controls & Video Downloader FAB column (hidden during Fullscreen and PiP)
+                if ((videoTelemetry.hasVideo || detectedStreams.isNotEmpty()) && !hideBrowserChrome) {
+                  Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier
+                      .align(if (settings.floatingButtonOnRight) Alignment.BottomEnd else Alignment.BottomStart)
+                      .padding(18.dp)
+                  ) {
+                    if (detectedStreams.isNotEmpty()) {
+                      SmallFloatingActionButton(
+                        onClick = { showVideoDownloaderSheet = true },
+                        shape = CircleShape,
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                      ) {
+                        BadgedBox(
+                          badge = {
+                            Badge { Text("${detectedStreams.size}") }
+                          }
+                        ) {
+                          Icon(
+                            Icons.Filled.Download,
+                            contentDescription = "Download detected anime video",
+                            modifier = Modifier.size(20.dp)
+                          )
+                        }
+                      }
+                    }
+                    if (videoTelemetry.hasVideo) {
+                      FloatingVideoControlButton(
+                        telemetry = videoTelemetry,
+                        enhancementConfig = enhancementConfig,
+                        onClick = { showVideoControlPanel = true }
+                      )
+                    }
+                  }
+                }
+
+                // Non-blocking Fullscreen Floating Corner Pill (renders above native HTML5 fullscreen; hidden in PiP)
+                if (isAnyFullscreen && !isInPipMode) {
+                  FullscreenToolsCornerPill(
+                    telemetry = videoTelemetry,
+                    scalingMode = scalingMode,
+                    customZoom = customZoom,
+                    detectedStreamCount = detectedStreams.size,
+                    isForceFullscreen = isForceFullScreen,
+                    onSetScalingMode = viewModel::setScalingMode,
+                    onOpenEnhancer = { showEnhancerSheet = true },
+                    onOpenDownloader = { showVideoDownloaderSheet = true },
+                    onOpenControlPanel = { showVideoControlPanel = true },
+                    onSkipIntro85 = { viewModel.seekVideoBy(85.0) },
+                    onToggleOrientation = onToggleOrientation,
+                    onEnterPip = onEnterPip,
+                    onExitFullscreen = viewModel::exitAnyFullscreen,
+                    modifier = Modifier.align(Alignment.TopEnd)
+                  )
                 }
               }
 
-              // Non-blocking Fullscreen Floating Corner Pill (hidden in PiP so PiP shows clean video)
-              if (isAnyFullscreen && !isInPipMode) {
-                FullscreenToolsCornerPill(
-                  telemetry = videoTelemetry,
-                  scalingMode = scalingMode,
-                  customZoom = customZoom,
-                  detectedStreamCount = detectedStreams.size,
-                  isForceFullscreen = isForceFullScreen,
-                  onSetScalingMode = viewModel::setScalingMode,
-                  onOpenEnhancer = { showEnhancerSheet = true },
-                  onOpenDownloader = { showVideoDownloaderSheet = true },
-                  onOpenControlPanel = { showVideoControlPanel = true },
-                  onSkipIntro85 = { viewModel.seekVideoBy(85.0) },
-                  onToggleOrientation = onToggleOrientation,
-                  onEnterPip = onEnterPip,
-                  onExitFullscreen = viewModel::exitAnyFullscreen,
-                  modifier = Modifier.align(Alignment.TopEnd)
+              // Optional Live Performance HUD Overlay (works in normal & fullscreen; hidden in tiny PiP window)
+              if (settings.showPerformanceOverlay && !isInPipMode) {
+                PerformanceHudChip(
+                  stats = perfStats,
+                  videoTelemetry = videoTelemetry,
+                  modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .then(if (isAnyFullscreen) Modifier.statusBarsPadding() else Modifier)
+                    .padding(10.dp)
                 )
               }
-            }
-
-            // Optional Live Performance HUD Overlay (works in normal & fullscreen; hidden in tiny PiP window)
-            if (settings.showPerformanceOverlay && !isInPipMode) {
-              PerformanceHudChip(
-                stats = perfStats,
-                videoTelemetry = videoTelemetry,
-                modifier = Modifier
-                  .align(Alignment.TopStart)
-                  .then(if (isAnyFullscreen) Modifier.statusBarsPadding() else Modifier)
-                  .padding(10.dp)
-              )
             }
           }
         }
       }
-    }
 
-    // --- Modals & Bottom Sheets ---
-    if (showMenuSheet) {
-      BrowserMenuBottomSheet(
-        activeTab = activeTab,
-        onDismiss = { showMenuSheet = false },
-        onNewTab = { viewModel.createNewTab(url = "", isPrivate = false); currentRoute = BrowserScreenRoute.BROWSER },
-        onNewPrivateTab = { viewModel.createNewTab(url = "", isPrivate = true); currentRoute = BrowserScreenRoute.BROWSER },
-        onOpenBookmarks = { currentRoute = BrowserScreenRoute.BOOKMARKS },
-        onOpenHistory = { currentRoute = BrowserScreenRoute.HISTORY },
-        onOpenDownloads = { currentRoute = BrowserScreenRoute.DOWNLOADS },
-        onOpenEnhancer = { showEnhancerSheet = true },
-        onOpenExtensions = { currentRoute = BrowserScreenRoute.EXTENSIONS },
-        onOpenPrivacy = { currentRoute = BrowserScreenRoute.PRIVACY },
-        onOpenSitePermissions = { currentRoute = BrowserScreenRoute.SITE_PERMISSIONS },
-        onOpenSettings = { currentRoute = BrowserScreenRoute.SETTINGS },
-        onToggleDesktopMode = viewModel::toggleDesktopMode,
-        onOpenFindInPage = { showFindInPage = true },
-        onSharePage = {
-          activeTab?.let { if (!it.isHomePage) viewModel.shareUrl(context, it.title, it.url) }
-        },
-        onCopyUrl = {
-          activeTab?.url?.takeIf { it.isNotBlank() }?.let { url ->
-            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            cm.setPrimaryClip(ClipData.newPlainText("URL", url))
-            Toast.makeText(context, "URL copied", Toast.LENGTH_SHORT).show()
-          }
-        },
-        onShowQrCode = { showQrDialog = true },
-        onTranslatePage = viewModel::translateCurrentPage,
-        onReaderMode = viewModel::requestReaderMode,
-        onSaveWebpage = viewModel::saveCurrentWebpage
-      )
-    }
-
-    if (showEnhancerSheet) {
-      VideoEnhancementSheet(
-        config = enhancementConfig,
-        telemetry = videoTelemetry,
-        onDismiss = { showEnhancerSheet = false },
-        onToggleMaster = viewModel::toggleEnhancementMaster,
-        onSelectPreset = viewModel::applyEnhancementPreset,
-        onUpdateCustom = viewModel::updateCustomEnhancement,
-        onToggleFrameGen = viewModel::toggleFrameGeneration,
-        onSelectTargetFps = viewModel::setTargetFps
-      )
-    }
-
-    if (showVideoControlPanel) {
-      FloatingVideoControlPanel(
-        telemetry = videoTelemetry,
-        scalingMode = scalingMode,
-        customZoom = customZoom,
-        enhancementConfig = enhancementConfig,
-        isFullscreen = isAnyFullscreen,
-        detectedStreamCount = detectedStreams.size,
-        onDismiss = { showVideoControlPanel = false },
-        onToggleForceFullscreen = { enable -> viewModel.setForceFullscreen(enable, hideSiteControls = true) },
-        onSelectScalingMode = viewModel::setScalingMode,
-        onOpenEnhancer = { showEnhancerSheet = true },
-        onOpenDownloader = { showVideoDownloaderSheet = true },
-        onEnterPip = onEnterPip,
-        onTogglePlayPause = viewModel::toggleVideoPlayPause,
-        onSeekBy = viewModel::seekVideoBy,
-        onSetSpeed = viewModel::setVideoPlaybackSpeed,
-        onToggleMute = viewModel::toggleVideoMute,
-        onToggleSubtitles = viewModel::toggleVideoSubtitles
-      )
-    }
-
-    if (showVideoDownloaderSheet) {
-      VideoDownloaderSheet(
-        pageTitle = activeTab?.title.orEmpty(),
-        videoTelemetry = videoTelemetry,
-        detectedStreams = detectedStreams,
-        hlsVariantsByUrl = hlsVariantsByUrl,
-        inspectingUrl = inspectingHlsUrl,
-        onInspectHls = viewModel::inspectHlsQualities,
-        onDownloadStream = { stream, fileName, variantUrl ->
-          viewModel.downloadDetectedStream(stream, fileName, variantUrl)
-          showVideoDownloaderSheet = false
-        },
-        onOpenDownloadsScreen = { currentRoute = BrowserScreenRoute.DOWNLOADS },
-        onDismiss = { showVideoDownloaderSheet = false }
-      )
-    }
-
-    if (showQrDialog && activeTab != null && !activeTab!!.isHomePage) {
-      QrCodeDialog(
-        url = activeTab!!.url,
-        title = activeTab!!.title,
-        onDismiss = { showQrDialog = false }
-      )
-    }
-
-    readerArticle?.let { article ->
-      ReaderModeSheet(
-        article = article,
-        onDismiss = viewModel::dismissReaderMode
-      )
-    }
-
-    pendingSitePermission?.let { req ->
-      SitePermissionPromptDialog(
-        request = req,
-        onDecision = viewModel::resolvePendingSitePermission
-      )
-    }
-
-    availableUpdate?.let { release ->
-      if (!isInPipMode) {
-        AppUpdateDialog(
-          release = release,
-          downloadState = updateDownloadState,
-          onInstallUpdate = viewModel::installAvailableUpdate,
-          onOpenReleasePage = { url ->
-            viewModel.ignoreAvailableUpdate()
-            currentRoute = BrowserScreenRoute.BROWSER
-            viewModel.navigateActiveTab(url)
+      // --- Modals & Bottom Sheets (rendered above both browser and native HTML5 fullscreen!) ---
+      if (showMenuSheet) {
+        BrowserMenuBottomSheet(
+          activeTab = activeTab,
+          onDismiss = { showMenuSheet = false },
+          onNewTab = { viewModel.createNewTab(url = "", isPrivate = false); currentRoute = BrowserScreenRoute.BROWSER },
+          onNewPrivateTab = { viewModel.createNewTab(url = "", isPrivate = true); currentRoute = BrowserScreenRoute.BROWSER },
+          onOpenBookmarks = { currentRoute = BrowserScreenRoute.BOOKMARKS },
+          onOpenHistory = { currentRoute = BrowserScreenRoute.HISTORY },
+          onOpenDownloads = { currentRoute = BrowserScreenRoute.DOWNLOADS },
+          onOpenEnhancer = { showEnhancerSheet = true },
+          onOpenExtensions = { currentRoute = BrowserScreenRoute.EXTENSIONS },
+          onOpenPrivacy = { currentRoute = BrowserScreenRoute.PRIVACY },
+          onOpenSitePermissions = { currentRoute = BrowserScreenRoute.SITE_PERMISSIONS },
+          onOpenSettings = { currentRoute = BrowserScreenRoute.SETTINGS },
+          onToggleDesktopMode = viewModel::toggleDesktopMode,
+          onOpenFindInPage = { showFindInPage = true },
+          onSharePage = {
+            activeTab?.let { if (!it.isHomePage) viewModel.shareUrl(context, it.title, it.url) }
           },
-          onSkipVersion = viewModel::skipAvailableUpdate,
-          onIgnoreForNow = viewModel::ignoreAvailableUpdate
+          onCopyUrl = {
+            activeTab?.url?.takeIf { it.isNotBlank() }?.let { url ->
+              val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+              cm.setPrimaryClip(ClipData.newPlainText("URL", url))
+              Toast.makeText(context, "URL copied", Toast.LENGTH_SHORT).show()
+            }
+          },
+          onShowQrCode = { showQrDialog = true },
+          onTranslatePage = viewModel::translateCurrentPage,
+          onReaderMode = viewModel::requestReaderMode,
+          onSaveWebpage = viewModel::saveCurrentWebpage
         )
       }
-    }
+
+      if (showEnhancerSheet) {
+        VideoEnhancementSheet(
+          config = enhancementConfig,
+          telemetry = videoTelemetry,
+          onDismiss = { showEnhancerSheet = false },
+          onToggleMaster = viewModel::toggleEnhancementMaster,
+          onSelectPreset = viewModel::applyEnhancementPreset,
+          onUpdateCustom = viewModel::updateCustomEnhancement,
+          onToggleFrameGen = viewModel::toggleFrameGeneration,
+          onSelectTargetFps = viewModel::setTargetFps
+        )
+      }
+
+      if (showVideoControlPanel) {
+        FloatingVideoControlPanel(
+          telemetry = videoTelemetry,
+          scalingMode = scalingMode,
+          customZoom = customZoom,
+          enhancementConfig = enhancementConfig,
+          isFullscreen = isAnyFullscreen,
+          detectedStreamCount = detectedStreams.size,
+          onDismiss = { showVideoControlPanel = false },
+          onToggleForceFullscreen = { enable -> viewModel.setForceFullscreen(enable, hideSiteControls = true) },
+          onSelectScalingMode = viewModel::setScalingMode,
+          onOpenEnhancer = { showEnhancerSheet = true },
+          onOpenDownloader = { showVideoDownloaderSheet = true },
+          onEnterPip = onEnterPip,
+          onTogglePlayPause = viewModel::toggleVideoPlayPause,
+          onSeekBy = viewModel::seekVideoBy,
+          onSetSpeed = viewModel::setVideoPlaybackSpeed,
+          onToggleMute = viewModel::toggleVideoMute,
+          onToggleSubtitles = viewModel::toggleVideoSubtitles
+        )
+      }
+
+      if (showVideoDownloaderSheet) {
+        VideoDownloaderSheet(
+          pageTitle = activeTab?.title.orEmpty(),
+          videoTelemetry = videoTelemetry,
+          detectedStreams = detectedStreams,
+          hlsVariantsByUrl = hlsVariantsByUrl,
+          inspectingUrl = inspectingHlsUrl,
+          onInspectHls = viewModel::inspectHlsQualities,
+          onDownloadStream = { stream, fileName, variantUrl ->
+            viewModel.downloadDetectedStream(stream, fileName, variantUrl)
+            showVideoDownloaderSheet = false
+          },
+          onOpenDownloadsScreen = { currentRoute = BrowserScreenRoute.DOWNLOADS },
+          onDismiss = { showVideoDownloaderSheet = false }
+        )
+      }
+
+      if (showQrDialog && activeTab != null && !activeTab!!.isHomePage) {
+        QrCodeDialog(
+          url = activeTab!!.url,
+          title = activeTab!!.title,
+          onDismiss = { showQrDialog = false }
+        )
+      }
+
+      readerArticle?.let { article ->
+        ReaderModeSheet(
+          article = article,
+          onDismiss = viewModel::dismissReaderMode
+        )
+      }
+
+      pendingSitePermission?.let { req ->
+        SitePermissionPromptDialog(
+          request = req,
+          onDecision = viewModel::resolvePendingSitePermission
+        )
+      }
+
+      availableUpdate?.let { release ->
+        if (!isInPipMode) {
+          AppUpdateDialog(
+            release = release,
+            downloadState = updateDownloadState,
+            onInstallUpdate = viewModel::installAvailableUpdate,
+            onOpenReleasePage = { url ->
+              viewModel.ignoreAvailableUpdate()
+              currentRoute = BrowserScreenRoute.BROWSER
+              viewModel.navigateActiveTab(url)
+            },
+            onSkipVersion = viewModel::skipAvailableUpdate,
+            onIgnoreForNow = viewModel::ignoreAvailableUpdate
+          )
+        }
+      }
     }
   }
 }
 
 @Composable
-private fun GeckoTabWebView(
+private fun ChromiumTabWebView(
   tabId: String,
-  getSession: () -> org.mozilla.geckoview.GeckoSession,
-  onRegisterGeckoView: (GeckoView?) -> Unit,
+  generation: Long,
+  getWebView: () -> WebView,
+  onRegisterWebView: (WebView?) -> Unit,
   modifier: Modifier = Modifier
 ) {
-  // Memoize session lookup strictly by tabId so frequent telemetry / slider recompositions
-  // NEVER call session.setActive(true) or suspendInactiveSessions during video playback!
-  val desiredSession = remember(tabId) { getSession() }
-  var geckoViewRef by remember { mutableStateOf<GeckoView?>(null) }
+  val desiredWebView = remember(tabId, generation) { getWebView() }
+  var hostRef by remember { mutableStateOf<FrameLayout?>(null) }
 
   DisposableEffect(Unit) {
     onDispose {
-      onRegisterGeckoView(null)
-      geckoViewRef?.releaseSession()
+      onRegisterWebView(null)
+      hostRef?.removeAllViews()
     }
   }
 
   AndroidView(
     factory = { ctx ->
-      GeckoView(ctx).apply {
-        // NOTE: Do NOT call coverUntilFirstPaint(Color.BLACK) here — on Android 12–16,
-        // minimizing the app or returning from Picture-in-Picture recreates SurfaceView and
-        // leaves coverUntilFirstPaint stuck permanently black until full page reload!
-        setBackgroundColor(android.graphics.Color.TRANSPARENT)
-        setSession(desiredSession)
-        geckoViewRef = this
-        onRegisterGeckoView(this)
+      FrameLayout(ctx).apply {
+        layoutParams = ViewGroup.LayoutParams(
+          ViewGroup.LayoutParams.MATCH_PARENT,
+          ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        hostRef = this
+        attachChildSafely(this, desiredWebView)
+        onRegisterWebView(desiredWebView)
       }
     },
-    update = { view ->
-      onRegisterGeckoView(view)
-      if (view.session !== desiredSession) {
-        view.releaseSession()
-        view.setSession(desiredSession)
+    update = { container ->
+      onRegisterWebView(desiredWebView)
+      if (container.childCount != 1 || container.getChildAt(0) !== desiredWebView) {
+        attachChildSafely(container, desiredWebView)
       }
     },
     modifier = modifier
   )
+}
+
+@Composable
+private fun ChromiumFullscreenCustomViewHost(
+  customView: View,
+  modifier: Modifier = Modifier
+) {
+  var hostRef by remember { mutableStateOf<FrameLayout?>(null) }
+
+  DisposableEffect(customView) {
+    onDispose {
+      hostRef?.removeAllViews()
+    }
+  }
+
+  AndroidView(
+    factory = { ctx ->
+      FrameLayout(ctx).apply {
+        layoutParams = ViewGroup.LayoutParams(
+          ViewGroup.LayoutParams.MATCH_PARENT,
+          ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        hostRef = this
+        attachChildSafely(this, customView)
+      }
+    },
+    update = { container ->
+      if (container.childCount != 1 || container.getChildAt(0) !== customView) {
+        attachChildSafely(container, customView)
+      }
+    },
+    modifier = modifier
+  )
+}
+
+private fun attachChildSafely(container: FrameLayout, child: View) {
+  (child.parent as? ViewGroup)?.let { oldParent ->
+    if (oldParent !== container) {
+      oldParent.removeView(child)
+    }
+  }
+  if (child.parent !== container) {
+    container.removeAllViews()
+    container.addView(
+      child,
+      FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.MATCH_PARENT
+      )
+    )
+  }
 }

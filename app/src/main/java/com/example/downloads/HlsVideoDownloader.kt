@@ -116,7 +116,7 @@ class HlsVideoDownloader(
       val builder = Request.Builder().url(url).head()
       headers.forEach { (k, v) -> if (v.isNotBlank()) builder.header(k, v) }
       if (!headers.keys.any { it.equals("User-Agent", ignoreCase = true) }) {
-        builder.header("User-Agent", "Mozilla/5.0 (Android 16; Mobile; rv:140.0) Gecko/140.0 Firefox/140.0")
+        builder.header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36")
       }
       client.newCall(builder.build()).execute().use { resp ->
         resp.header("Content-Length")?.toLongOrNull() ?: 0L
@@ -359,7 +359,7 @@ class HlsVideoDownloader(
       if (v.isNotBlank()) builder.header(k, v)
     }
     if (!headers.keys.any { it.equals("User-Agent", ignoreCase = true) }) {
-      builder.header("User-Agent", "Mozilla/5.0 (Android 16; Mobile; rv:140.0) Gecko/140.0 Firefox/140.0")
+      builder.header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36")
     }
     return builder.build()
   }

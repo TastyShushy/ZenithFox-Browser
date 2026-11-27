@@ -93,7 +93,7 @@ fun ExtensionsScreen(
         Column {
           Text("Extension Manager", style = MaterialTheme.typography.headlineSmall)
           Text(
-            text = "Mozilla GeckoView WebExtensions Runtime (MV2 Built-In)",
+            text = "Chromium Blink + V8 + ANGLE Engine (Built-In Modules)",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.primary
           )
@@ -185,11 +185,11 @@ fun ExtensionsScreen(
           Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
               Icon(Icons.Filled.Info, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
-              Text("AniLens & Chrome Web Store Compatibility", style = MaterialTheme.typography.titleMedium)
+              Text("Chromium GPU Acceleration & Built-In Modules", style = MaterialTheme.typography.titleMedium)
             }
             Text(
-              text = "• Upstream AniLens (awdas221/AniLens) and MAX Video Downloader target desktop Chromium Manifest V3 (WebGPU / Chrome declarativeNetRequest / desktop CoApp) and cannot run natively on Android GeckoView.\n" +
-                "• Solution implemented: Clean-room GeckoView WebExtensions running real WebGL2/WebGL1 Anime4K GLSL shaders across all Android GPUs (Adreno, Mali, Xclipse, PowerVR) plus a native Kotlin HLS/MP4 video downloader.",
+              text = "• ZenithFox v2.0.0 runs directly on Android Chromium (Blink + V8 + ANGLE GPU) with document-start multi-frame injection.\n" +
+                "• Native zero-copy WebGL2 4K upscaling, GPU Optical-Flow Frame Generation, network-level ad shielding, and HLS/MP4 video downloading all run natively across Adreno, Mali, Xclipse, and PowerVR GPUs.",
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -274,7 +274,7 @@ fun PrivacyDashboardScreen(
           modifier = Modifier.fillMaxWidth()
         ) {
           Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            ToggleRow("Ad & Tracker Blocker", "Blocks ad networks via WebExtension + GeckoView ETP", settings.adBlockEnabled) { v ->
+            ToggleRow("Ad & Tracker Blocker", "Blocks ad networks in Chromium network layer + cosmetic DOM filter", settings.adBlockEnabled) { v ->
               onUpdateSettings { it.copy(adBlockEnabled = v) }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -413,7 +413,7 @@ fun PrivacyDashboardScreen(
               Text("Transparent Local-Only Privacy Policy", style = MaterialTheme.typography.titleSmall)
             }
             Text(
-              text = "ZenithFox Browser collects zero analytics, zero telemetry (built on Mozilla GeckoView Lite without Glean), and never transmits your browsing history, bookmarks, or downloads to any server. All user data stays strictly in local Room & DataStore storage on your device.",
+              text = "ZenithFox Browser collects zero analytics, zero telemetry, and never transmits your browsing history, bookmarks, or downloads to any server. All user data stays strictly in local Room & DataStore storage on your device with Safe Browsing and isolated WebView file protections enabled.",
               style = MaterialTheme.typography.bodySmall,
               color = MaterialTheme.colorScheme.onSurfaceVariant
             )
