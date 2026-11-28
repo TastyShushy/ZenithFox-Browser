@@ -168,6 +168,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
   private var lastRecordedVideoUrl: String = ""
   private var startupUpdateCheckDone = false
   @Volatile private var isAppInForeground = true
+  @Volatile private var isPerfStatsVisible = false
 
   private val sessionListener = object : ChromiumEngineManager.SessionEventListener {
     override fun onLocationChanged(tabId: String, url: String) {
@@ -324,7 +325,6 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     observeVideoTelemetryForHistory()
     observeDetectedStreamsForAutoInspect()
     observeSavedHtml()
-    startPerformanceStatsLoop()
     scheduleStartupUpdateCheck()
   }
 
@@ -440,13 +440,30 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
   }
 
   /**
-   * Battery-safe performance telemetry loop: runs ONLY while ZenithFox Browser is
-   * actively in the foreground! Completely halted in background / sleep -> 0% overnight drain.
+   * Battery-safe ON-DEMAND performance telemetry loop:
+   * Runs ONLY while the user actually has the Performance HUD enabled or is viewing
+   * the Settings / Tab Switcher screen — ZERO Binder IPC & ZERO Compose recompositions
+   * during normal anime playback or background sleep!
    */
+  fun setPerfStatsVisible(visible: Boolean) {
+    if (isPerfStatsVisible == visible) return
+    isPerfStatsVisible = visible
+    if (visible && isAppInForeground) {
+      startPerformanceStatsLoop()
+    } else {
+      stopPerformanceStatsLoop()
+    }
+  }
+
+  fun setDetailedTelemetryActive(detailed: Boolean) {
+    chromiumEngine.sendTelemetryMode(detailed)
+  }
+
   private fun startPerformanceStatsLoop() {
+    if (!isPerfStatsVisible || !isAppInForeground) return
     if (perfStatsJob?.isActive == true) return
     perfStatsJob = viewModelScope.launch(Dispatchers.Default) {
-      while (isActive && isAppInForeground) {
+      while (isActive && isAppInForeground && isPerfStatsVisible) {
         val activeSessions = chromiumEngine.activeSessionCount()
         val totalTabs = _tabs.value.size
         val suspended = (totalTabs - activeSessions).coerceAtLeast(0)
@@ -455,7 +472,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
           suspendedSessions = suspended,
           gpuRendererFromWebGl = videoTelemetry.value.gpuRenderer
         )
-        delay(3000L)
+        delay(3500L)
       }
     }
   }

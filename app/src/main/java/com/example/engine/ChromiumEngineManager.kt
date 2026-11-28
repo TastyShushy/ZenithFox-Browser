@@ -121,6 +121,7 @@ class ChromiumEngineManager(
   private var downloaderEnabled: Boolean = true
   private var cachedEnhancementConfig: EnhancementConfig? = null
   private var cachedScaling: Pair<VideoScalingMode, Float>? = null
+  @Volatile private var cachedDetailedTelemetry: Boolean = false
 
   private var customViewCallback: WebChromeClient.CustomViewCallback? = null
   private val _fullscreenCustomView = MutableStateFlow<View?>(null)
@@ -490,7 +491,7 @@ class ChromiumEngineManager(
           VideoScalingMode.valueOf(d.optString("scalingMode", "FIT"))
         }.getOrDefault(VideoScalingMode.FIT)
 
-        _videoTelemetry.value = VideoTelemetry(
+        val nextTelemetry = VideoTelemetry(
           hasVideo = true,
           url = d.optString("url", ""),
           videoWidth = d.optInt("videoWidth", 0),
@@ -503,7 +504,7 @@ class ChromiumEngineManager(
           sourceFps = d.optInt("sourceFps", 0),
           outputFps = d.optInt("outputFps", 0),
           enhancementStatus = d.optString("enhancementStatus", "IDLE"),
-          gpuRenderer = d.optString("gpuRenderer", "Chromium ANGLE GPU"),
+          gpuRenderer = d.optString("gpuRenderer", "Android HWC Hardware Decode"),
           webGpuSupported = d.optBoolean("webGpuSupported", false),
           isDrmProtected = false,
           hasSubtitles = d.optBoolean("hasSubtitles", false),
@@ -515,6 +516,9 @@ class ChromiumEngineManager(
           frameGenActive = d.optBoolean("frameGenActive", false),
           frameGenAutoDisabled = d.optBoolean("frameGenAutoDisabled", false)
         )
+        if (_videoTelemetry.value != nextTelemetry) {
+          _videoTelemetry.value = nextTelemetry
+        }
       }
       "STREAM_DETECTED" -> {
         if (!downloaderEnabled || tabId != activeTabId) return
@@ -569,6 +573,11 @@ class ChromiumEngineManager(
     reqHeaders: Map<String, String>?,
     pageUrl: String
   ) {
+    // Ultra-fast O(1) pre-filter before any URI parsing or Regex work (skips 99% of .ts/.jpg/.js/.css chunks!)
+    val lower = url.lowercase()
+    val maybeVideo = lower.contains("m3u8") || lower.contains(".mp4") || lower.contains(".m4v") || lower.contains(".webm")
+    if (!maybeVideo) return
+
     val host = UrlUtils.extractHost(url).lowercase()
     val pageHost = UrlUtils.extractHost(pageUrl).lowercase()
     if (EXCLUDED_DOWNLOAD_HOSTS.any { host.endsWith(it) || pageHost.endsWith(it) }) return
@@ -631,6 +640,7 @@ class ChromiumEngineManager(
     runCatching {
       cachedEnhancementConfig?.let { proxy.postMessage(buildEnhancementMessage(it).toString()) }
       cachedScaling?.let { (m, z) -> proxy.postMessage(buildScalingMessage(m, z).toString()) }
+      proxy.postMessage(buildTelemetryModeMessage(cachedDetailedTelemetry).toString())
       proxy.postMessage(buildAdBlockSyncMessage().toString())
     }
   }
@@ -638,6 +648,7 @@ class ChromiumEngineManager(
   private fun syncStateToTab(tabId: String) {
     cachedEnhancementConfig?.let { sendJsonToTab(tabId, buildEnhancementMessage(it)) }
     cachedScaling?.let { (m, z) -> sendJsonToTab(tabId, buildScalingMessage(m, z)) }
+    sendJsonToTab(tabId, buildTelemetryModeMessage(cachedDetailedTelemetry))
     sendJsonToTab(tabId, buildAdBlockSyncMessage())
   }
 
@@ -865,6 +876,20 @@ class ChromiumEngineManager(
         put("popupBlockEnabled", adBlockEngine.isPopupBlockingEnabled)
       })
     }
+
+  private fun buildTelemetryModeMessage(detailed: Boolean): JSONObject =
+    JSONObject().apply {
+      put("type", "SET_TELEMETRY_MODE")
+      put("payload", JSONObject().apply {
+        put("detailed", detailed)
+      })
+    }
+
+  fun sendTelemetryMode(detailed: Boolean) {
+    if (cachedDetailedTelemetry == detailed) return
+    cachedDetailedTelemetry = detailed
+    sendJsonToActiveTab(buildTelemetryModeMessage(detailed))
+  }
 
   fun sendEnhancementConfig(config: EnhancementConfig) {
     cachedEnhancementConfig = config

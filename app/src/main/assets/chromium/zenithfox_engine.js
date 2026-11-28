@@ -240,9 +240,18 @@
       let d = abs(a - b);
       return (d.r + d.g + d.b) * 0.577;
     }
+    fn softKneeDelta(rawDelta: f32, minCh: f32, maxCh: f32, maxCap: f32) -> f32 {
+      if (rawDelta < 0.0) {
+        let lim = min(maxCap, minCh * 0.72);
+        let mag = -rawDelta;
+        return -(mag * lim) / (mag + lim + 0.0001);
+      }
+      let lim = min(maxCap, (1.0 - maxCh) * 0.72);
+      return (rawDelta * lim) / (rawDelta + lim + 0.0001);
+    }
   `;
 
-  // Pipeline 1A: Zero-Copy Direct External Video -> 5-Tap AniLens CAS + Anime4K (Frame Gen OFF)
+  // Pipeline 1A: Zero-Copy Direct External Video -> 9-Tap Full-3x3 AniLens 4K CAS + Anime4K (Frame Gen OFF)
   const WGSL_UPSCALE_EXTERNAL = WGSL_COMMON_HEADER + `
     @group(0) @binding(0) var uSampler: sampler;
     @group(0) @binding(1) var uVideoTex: texture_external;
@@ -265,62 +274,75 @@
 
       let dx = vec2<f32>(u.srcTexelX, 0.0);
       let dy = vec2<f32>(0.0, u.srcTexelY);
-      let n = sampleExt(in.uv - dy);
-      let s = sampleExt(in.uv + dy);
-      let w = sampleExt(in.uv - dx);
-      let e = sampleExt(in.uv + dx);
+      let n  = sampleExt(in.uv - dy);
+      let s  = sampleExt(in.uv + dy);
+      let w  = sampleExt(in.uv - dx);
+      let e  = sampleExt(in.uv + dx);
+      let nw = sampleExt(in.uv - dx - dy);
+      let ne = sampleExt(in.uv + dx - dy);
+      let sw = sampleExt(in.uv - dx + dy);
+      let se = sampleExt(in.uv + dx + dy);
 
-      let lc = luma(c);
-      let ln = luma(n);
-      let ls = luma(s);
-      let lw = luma(w);
-      let le = luma(e);
+      let lc  = luma(c);
+      let ln  = luma(n);
+      let ls  = luma(s);
+      let lw  = luma(w);
+      let le  = luma(e);
+      let lnw = luma(nw);
+      let lne = luma(ne);
+      let lsw = luma(sw);
+      let lse = luma(se);
 
       var result = c;
-      let lMin = min(lc, min(min(ln, ls), min(lw, le)));
-      let lMax = max(lc, max(max(ln, ls), max(lw, le)));
+      let lMinCard = min(lc, min(min(ln, ls), min(lw, le)));
+      let lMaxCard = max(lc, max(max(ln, ls), max(lw, le)));
+      let lMin = min(lMinCard, min(min(lnw, lne), min(lsw, lse)));
+      let lMax = max(lMaxCard, max(max(lnw, lne), max(lsw, lse)));
       let contrastRange = lMax - lMin;
 
-      // 1. Branchless Tent Bilateral Denoise + Anti-Banding
-      let smoothFactor = max(u.denoise * 0.45, u.deband * 0.35);
+      // 1. Branchless Tent Bilateral Denoise + Sky Anti-Banding (flat areas only, preserves crisp textures!)
+      let smoothFactor = max(u.denoise * 0.42, u.deband * 0.34);
       if (smoothFactor > 0.01) {
-        let wn = max(0.0, 1.0 - abs(ln - lc) * 28.0);
-        let ws = max(0.0, 1.0 - abs(ls - lc) * 28.0);
-        let ww = max(0.0, 1.0 - abs(lw - lc) * 28.0);
-        let we = max(0.0, 1.0 - abs(le - lc) * 28.0);
+        let wn = max(0.0, 1.0 - abs(ln - lc) * 32.0);
+        let ws = max(0.0, 1.0 - abs(ls - lc) * 32.0);
+        let ww = max(0.0, 1.0 - abs(lw - lc) * 32.0);
+        let we = max(0.0, 1.0 - abs(le - lc) * 32.0);
         let denoised = (c + n * wn + s * ws + w * ww + e * we) / (1.0 + wn + ws + ww + we);
-        let flatMask = 1.0 - smoothstep(0.03, 0.14, contrastRange);
+        let flatMask = 1.0 - smoothstep(0.025, 0.11, contrastRange);
         result = mix(result, denoised, smoothFactor * flatMask);
       }
 
-      // 2. FidelityFX-Style Contrast-Adaptive Luma Sharpening
-      let lBlur = (ln + ls + lw + le) * 0.25;
+      // 2. Full 3x3 Isotropic AniLens FidelityFX CAS (restores horizontal, vertical & 45-deg diagonal 4K detail!)
+      let lBlur = (ln + ls + lw + le) * 0.15 + (lnw + lne + lsw + lse) * 0.10;
       let highFreq = lc - lBlur;
-      let casRatio = clamp(min(lMin, 1.0 - lMax) / max(lMax, 0.14), 0.0, 1.0);
-      let sharpStrength = clamp(u.sharpen * 1.05 + u.upscaleStrength * 0.62, 0.0, 1.45);
-      let casDelta = highFreq * sharpStrength * (0.50 + 0.50 * casRatio);
+      let casRatio = clamp(min(lMin, 1.0 - lMax) / max(lMax, 0.12), 0.0, 1.0);
+      let sharpStrength = clamp(u.sharpen * 1.95 + u.upscaleStrength * 1.25, 0.0, 2.85);
+      let casDelta = highFreq * sharpStrength * (0.58 + 0.42 * casRatio);
 
-      // 3. Crisp Anime4K Ink-Line Thinning
-      let gradMag = (abs(le - lw) + abs(ls - ln)) * 0.5;
-      let lineMask = smoothstep(0.07, 0.22, gradMag) * smoothstep(0.14, 0.34, contrastRange);
+      // 3. Full-Sobel Anime4K Ink-Line Thinning & Diagonal Edge Reconstruction
+      let gx = (lne + 2.0 * le + lse) - (lnw + 2.0 * lw + lsw);
+      let gy = (lsw + 2.0 * ls + lse) - (lnw + 2.0 * ln + lne);
+      let sobelMag = (abs(gx) + abs(gy)) * 0.18;
+      let lineMask = smoothstep(0.045, 0.20, sobelMag) * smoothstep(0.08, 0.26, contrastRange);
       let midLuma = 0.5 * (lMin + lMax);
-      let lineStrength = clamp(u.upscaleStrength * 0.34 + u.edgeEnhance * 0.28, 0.0, 0.48) * lineMask;
-      var lineTarget = (lMax - lc) * 0.26;
+      let lineStrength = clamp(u.upscaleStrength * 0.58 + u.edgeEnhance * 0.52, 0.0, 0.92) * lineMask;
+      var lineTarget = (lMax - lc) * 0.48;
       if (lc < midLuma) {
-        lineTarget = (lMin - lc) * 0.44;
+        lineTarget = (lMin - lc) * 0.72;
       }
       let lineDelta = lineTarget * lineStrength;
 
-      // 4. Channel-Headroom Safety Clamp (ZERO black crush, 100% original colors!)
+      // 4. Fine Micro-Texture Pop (lifts muddy 720p/1080p foliage, hair, fabric & buildings to crisp 4K!)
+      let textureMask = smoothstep(0.03, 0.10, contrastRange) * (1.0 - smoothstep(0.35, 0.65, contrastRange));
+      let microDelta = highFreq * clamp(u.edgeEnhance * 0.75 + u.upscaleStrength * 0.45, 0.0, 1.05) * textureMask;
+
+      // 5. Soft-Knee Channel-Headroom Limiter (3x crisper detail pop, ZERO black crush, 100% true colors!)
       let minCh = min(result.r, min(result.g, result.b));
       let maxCh = max(result.r, max(result.g, result.b));
-      let shadowGuard = smoothstep(0.03, 0.16, lc);
-      let highlightGuard = smoothstep(0.98, 0.86, lc);
-      let rawDelta = (casDelta + lineDelta) * shadowGuard * highlightGuard;
-
-      let maxNeg = -min(0.12, minCh * 0.42);
-      let maxPos =  min(0.12, (1.0 - maxCh) * 0.42);
-      let safeDelta = clamp(rawDelta, maxNeg, maxPos);
+      let shadowGuard = smoothstep(0.015, 0.11, lc);
+      let highlightGuard = smoothstep(0.99, 0.89, lc);
+      let rawDelta = (casDelta + lineDelta + microDelta) * shadowGuard * highlightGuard;
+      let safeDelta = softKneeDelta(rawDelta, minCh, maxCh, 0.28);
 
       return vec4<f32>(clamp(result + vec3<f32>(safeDelta), vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
     }
@@ -337,7 +359,7 @@
     }
   `;
 
-  // Pipeline 1C: WebGPU Optical-Flow Frame Generation + Coherent 5-Tap CAS/Anime4K
+  // Pipeline 1C: WebGPU Optical-Flow Frame Generation + Coherent 9-Tap 4K CAS/Anime4K
   const WGSL_FRAMEGEN_2D = WGSL_COMMON_HEADER + `
     @group(0) @binding(0) var uSampler: sampler;
     @group(0) @binding(1) var uTexCurr: texture_2d<f32>;
@@ -355,53 +377,65 @@
     fn coherentDeltaCurr(uv: vec2<f32>, c: vec3<f32>) -> f32 {
       let dx = vec2<f32>(u.srcTexelX, 0.0);
       let dy = vec2<f32>(0.0, u.srcTexelY);
-      let lc = luma(c);
-      let ln = luma(tapCurr(uv - dy));
-      let ls = luma(tapCurr(uv + dy));
-      let lw = luma(tapCurr(uv - dx));
-      let le = luma(tapCurr(uv + dx));
-      let lMin = min(lc, min(min(ln, ls), min(lw, le)));
-      let lMax = max(lc, max(max(ln, ls), max(lw, le)));
+      let lc  = luma(c);
+      let ln  = luma(tapCurr(uv - dy));
+      let ls  = luma(tapCurr(uv + dy));
+      let lw  = luma(tapCurr(uv - dx));
+      let le  = luma(tapCurr(uv + dx));
+      let lnw = luma(tapCurr(uv - dx - dy));
+      let lne = luma(tapCurr(uv + dx - dy));
+      let lsw = luma(tapCurr(uv - dx + dy));
+      let lse = luma(tapCurr(uv + dx + dy));
+      let lMin = min(lc, min(min(min(ln, ls), min(lw, le)), min(min(lnw, lne), min(lsw, lse))));
+      let lMax = max(lc, max(max(max(ln, ls), max(lw, le)), max(max(lnw, lne), max(lsw, lse))));
       let contrastRange = lMax - lMin;
-      let highFreq = lc - (ln + ls + lw + le) * 0.25;
-      let casRatio = clamp(min(lMin, 1.0 - lMax) / max(lMax, 0.14), 0.0, 1.0);
-      let sharpStrength = clamp(u.sharpen * 0.98 + u.upscaleStrength * 0.56, 0.0, 1.35);
-      let casDelta = highFreq * sharpStrength * (0.50 + 0.50 * casRatio);
-      let gradMag = (abs(le - lw) + abs(ls - ln)) * 0.5;
-      let lineMask = smoothstep(0.07, 0.22, gradMag) * smoothstep(0.14, 0.34, contrastRange);
+      let highFreq = lc - ((ln + ls + lw + le) * 0.15 + (lnw + lne + lsw + lse) * 0.10);
+      let casRatio = clamp(min(lMin, 1.0 - lMax) / max(lMax, 0.12), 0.0, 1.0);
+      let sharpStrength = clamp(u.sharpen * 1.80 + u.upscaleStrength * 1.15, 0.0, 2.60);
+      let casDelta = highFreq * sharpStrength * (0.58 + 0.42 * casRatio);
+      let gx = (lne + 2.0 * le + lse) - (lnw + 2.0 * lw + lsw);
+      let gy = (lsw + 2.0 * ls + lse) - (lnw + 2.0 * ln + lne);
+      let sobelMag = (abs(gx) + abs(gy)) * 0.18;
+      let lineMask = smoothstep(0.045, 0.20, sobelMag) * smoothstep(0.08, 0.26, contrastRange);
       let midLuma = 0.5 * (lMin + lMax);
-      let lineStrength = clamp(u.upscaleStrength * 0.30 + u.edgeEnhance * 0.25, 0.0, 0.44) * lineMask;
-      var lineTarget = (lMax - lc) * 0.24;
+      let lineStrength = clamp(u.upscaleStrength * 0.52 + u.edgeEnhance * 0.46, 0.0, 0.84) * lineMask;
+      var lineTarget = (lMax - lc) * 0.44;
       if (lc < midLuma) {
-        lineTarget = (lMin - lc) * 0.40;
+        lineTarget = (lMin - lc) * 0.66;
       }
-      return (casDelta + lineTarget * lineStrength) * smoothstep(0.03, 0.16, lc) * smoothstep(0.98, 0.86, lc);
+      return (casDelta + lineTarget * lineStrength) * smoothstep(0.015, 0.11, lc) * smoothstep(0.99, 0.89, lc);
     }
 
     fn coherentDeltaPrev(uv: vec2<f32>, c: vec3<f32>) -> f32 {
       let dx = vec2<f32>(u.srcTexelX, 0.0);
       let dy = vec2<f32>(0.0, u.srcTexelY);
-      let lc = luma(c);
-      let ln = luma(tapPrev(uv - dy));
-      let ls = luma(tapPrev(uv + dy));
-      let lw = luma(tapPrev(uv - dx));
-      let le = luma(tapPrev(uv + dx));
-      let lMin = min(lc, min(min(ln, ls), min(lw, le)));
-      let lMax = max(lc, max(max(ln, ls), max(lw, le)));
+      let lc  = luma(c);
+      let ln  = luma(tapPrev(uv - dy));
+      let ls  = luma(tapPrev(uv + dy));
+      let lw  = luma(tapPrev(uv - dx));
+      let le  = luma(tapPrev(uv + dx));
+      let lnw = luma(tapPrev(uv - dx - dy));
+      let lne = luma(tapPrev(uv + dx - dy));
+      let lsw = luma(tapPrev(uv - dx + dy));
+      let lse = luma(tapPrev(uv + dx + dy));
+      let lMin = min(lc, min(min(min(ln, ls), min(lw, le)), min(min(lnw, lne), min(lsw, lse))));
+      let lMax = max(lc, max(max(max(ln, ls), max(lw, le)), max(max(lnw, lne), max(lsw, lse))));
       let contrastRange = lMax - lMin;
-      let highFreq = lc - (ln + ls + lw + le) * 0.25;
-      let casRatio = clamp(min(lMin, 1.0 - lMax) / max(lMax, 0.14), 0.0, 1.0);
-      let sharpStrength = clamp(u.sharpen * 0.98 + u.upscaleStrength * 0.56, 0.0, 1.35);
-      let casDelta = highFreq * sharpStrength * (0.50 + 0.50 * casRatio);
-      let gradMag = (abs(le - lw) + abs(ls - ln)) * 0.5;
-      let lineMask = smoothstep(0.07, 0.22, gradMag) * smoothstep(0.14, 0.34, contrastRange);
+      let highFreq = lc - ((ln + ls + lw + le) * 0.15 + (lnw + lne + lsw + lse) * 0.10);
+      let casRatio = clamp(min(lMin, 1.0 - lMax) / max(lMax, 0.12), 0.0, 1.0);
+      let sharpStrength = clamp(u.sharpen * 1.80 + u.upscaleStrength * 1.15, 0.0, 2.60);
+      let casDelta = highFreq * sharpStrength * (0.58 + 0.42 * casRatio);
+      let gx = (lne + 2.0 * le + lse) - (lnw + 2.0 * lw + lsw);
+      let gy = (lsw + 2.0 * ls + lse) - (lnw + 2.0 * ln + lne);
+      let sobelMag = (abs(gx) + abs(gy)) * 0.18;
+      let lineMask = smoothstep(0.045, 0.20, sobelMag) * smoothstep(0.08, 0.26, contrastRange);
       let midLuma = 0.5 * (lMin + lMax);
-      let lineStrength = clamp(u.upscaleStrength * 0.30 + u.edgeEnhance * 0.25, 0.0, 0.44) * lineMask;
-      var lineTarget = (lMax - lc) * 0.24;
+      let lineStrength = clamp(u.upscaleStrength * 0.52 + u.edgeEnhance * 0.46, 0.0, 0.84) * lineMask;
+      var lineTarget = (lMax - lc) * 0.44;
       if (lc < midLuma) {
-        lineTarget = (lMin - lc) * 0.40;
+        lineTarget = (lMin - lc) * 0.66;
       }
-      return (casDelta + lineTarget * lineStrength) * smoothstep(0.03, 0.16, lc) * smoothstep(0.98, 0.86, lc);
+      return (casDelta + lineTarget * lineStrength) * smoothstep(0.015, 0.11, lc) * smoothstep(0.99, 0.89, lc);
     }
 
     @fragment
@@ -481,9 +515,7 @@
 
       let minCh = min(outC.r, min(outC.g, outC.b));
       let maxCh = max(outC.r, max(outC.g, outC.b));
-      let maxNeg = -min(0.11, minCh * 0.42);
-      let maxPos =  min(0.11, (1.0 - maxCh) * 0.42);
-      let safeDelta = clamp(rawDelta, maxNeg, maxPos);
+      let safeDelta = softKneeDelta(rawDelta, minCh, maxCh, 0.26);
 
       return vec4<f32>(clamp(outC + vec3<f32>(safeDelta), vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
     }
@@ -596,91 +628,120 @@
       return mix(safeBlend, warpedBlend, warpConf);
     }
 
-    vec3 enhanceFrame5Tap(sampler2D tex, highp vec2 uv, vec3 c, bool applyDenoise) {
+    float softKneeDelta(float rawDelta, float minCh, float maxCh, float maxCap) {
+      if (rawDelta < 0.0) {
+        float lim = min(maxCap, minCh * 0.72);
+        float mag = -rawDelta;
+        return -(mag * lim) / (mag + lim + 0.0001);
+      }
+      float lim = min(maxCap, (1.0 - maxCh) * 0.72);
+      return (rawDelta * lim) / (rawDelta + lim + 0.0001);
+    }
+
+    vec3 enhanceFrame9Tap(sampler2D tex, highp vec2 uv, vec3 c, bool applyDenoise) {
       highp vec2 dx = vec2(uSrcTexelSize.x, 0.0);
       highp vec2 dy = vec2(0.0, uSrcTexelSize.y);
 
-      vec3 n = tapTex(tex, uv - dy);
-      vec3 s = tapTex(tex, uv + dy);
-      vec3 w = tapTex(tex, uv - dx);
-      vec3 e = tapTex(tex, uv + dx);
+      vec3 n  = tapTex(tex, uv - dy);
+      vec3 s  = tapTex(tex, uv + dy);
+      vec3 w  = tapTex(tex, uv - dx);
+      vec3 e  = tapTex(tex, uv + dx);
+      vec3 nw = tapTex(tex, uv - dx - dy);
+      vec3 ne = tapTex(tex, uv + dx - dy);
+      vec3 sw = tapTex(tex, uv - dx + dy);
+      vec3 se = tapTex(tex, uv + dx + dy);
 
-      float lc = luma(c);
-      float ln = luma(n);
-      float ls = luma(s);
-      float lw = luma(w);
-      float le = luma(e);
+      float lc  = luma(c);
+      float ln  = luma(n);
+      float ls  = luma(s);
+      float lw  = luma(w);
+      float le  = luma(e);
+      float lnw = luma(nw);
+      float lne = luma(ne);
+      float lsw = luma(sw);
+      float lse = luma(se);
 
       vec3 result = c;
-      float lMin = min(lc, min(min(ln, ls), min(lw, le)));
-      float lMax = max(lc, max(max(ln, ls), max(lw, le)));
+      float lMin = min(lc, min(min(min(ln, ls), min(lw, le)), min(min(lnw, lne), min(lsw, lse))));
+      float lMax = max(lc, max(max(max(ln, ls), max(lw, le)), max(max(lnw, lne), max(lsw, lse))));
       float contrastRange = lMax - lMin;
 
       if (applyDenoise) {
-        float smoothFactor = max(uDenoise * 0.45, uDeband * 0.35);
+        float smoothFactor = max(uDenoise * 0.42, uDeband * 0.34);
         if (smoothFactor > 0.01) {
-          float wn = max(0.0, 1.0 - abs(ln - lc) * 28.0);
-          float ws = max(0.0, 1.0 - abs(ls - lc) * 28.0);
-          float ww = max(0.0, 1.0 - abs(lw - lc) * 28.0);
-          float we = max(0.0, 1.0 - abs(le - lc) * 28.0);
+          float wn = max(0.0, 1.0 - abs(ln - lc) * 32.0);
+          float ws = max(0.0, 1.0 - abs(ls - lc) * 32.0);
+          float ww = max(0.0, 1.0 - abs(lw - lc) * 32.0);
+          float we = max(0.0, 1.0 - abs(le - lc) * 32.0);
           vec3 denoised = (c + n*wn + s*ws + w*ww + e*we) / (1.0 + wn + ws + ww + we);
-          float flatMask = 1.0 - smoothstep(0.03, 0.14, contrastRange);
+          float flatMask = 1.0 - smoothstep(0.025, 0.11, contrastRange);
           result = mix(result, denoised, smoothFactor * flatMask);
         }
       }
 
-      float lBlur = (ln + ls + lw + le) * 0.25;
+      // Full 3x3 Isotropic FidelityFX CAS (restores horizontal, vertical & 45-deg diagonal 4K detail)
+      float lBlur = (ln + ls + lw + le) * 0.15 + (lnw + lne + lsw + lse) * 0.10;
       float highFreq = lc - lBlur;
-      float casRatio = clamp(min(lMin, 1.0 - lMax) / max(lMax, 0.14), 0.0, 1.0);
-      float sharpStrength = clamp(uSharpen * 1.05 + uUpscaleStrength * 0.62, 0.0, 1.45);
-      float casDelta = highFreq * sharpStrength * (0.50 + 0.50 * casRatio);
+      float casRatio = clamp(min(lMin, 1.0 - lMax) / max(lMax, 0.12), 0.0, 1.0);
+      float sharpStrength = clamp(uSharpen * 1.95 + uUpscaleStrength * 1.25, 0.0, 2.85);
+      float casDelta = highFreq * sharpStrength * (0.58 + 0.42 * casRatio);
 
-      float gradMag = (abs(le - lw) + abs(ls - ln)) * 0.5;
-      float lineMask = smoothstep(0.07, 0.22, gradMag) * smoothstep(0.14, 0.34, contrastRange);
+      // Full-Sobel Anime4K Ink-Line Thinning & Diagonal Edge Reconstruction
+      float gx = (lne + 2.0 * le + lse) - (lnw + 2.0 * lw + lsw);
+      float gy = (lsw + 2.0 * ls + lse) - (lnw + 2.0 * ln + lne);
+      float sobelMag = (abs(gx) + abs(gy)) * 0.18;
+      float lineMask = smoothstep(0.045, 0.20, sobelMag) * smoothstep(0.08, 0.26, contrastRange);
       float midLuma = 0.5 * (lMin + lMax);
-      float lineStrength = clamp(uUpscaleStrength * 0.34 + uEdgeEnhance * 0.28, 0.0, 0.48) * lineMask;
-      float lineTarget = (lc < midLuma) ? (lMin - lc) * 0.44 : (lMax - lc) * 0.26;
+      float lineStrength = clamp(uUpscaleStrength * 0.58 + uEdgeEnhance * 0.52, 0.0, 0.92) * lineMask;
+      float lineTarget = (lc < midLuma) ? (lMin - lc) * 0.72 : (lMax - lc) * 0.48;
       float lineDelta = lineTarget * lineStrength;
+
+      // Fine Micro-Texture Pop (brings out crisp 4K detail in grass, hair, fabric, buildings)
+      float textureMask = smoothstep(0.03, 0.10, contrastRange) * (1.0 - smoothstep(0.35, 0.65, contrastRange));
+      float microDelta = highFreq * clamp(uEdgeEnhance * 0.75 + uUpscaleStrength * 0.45, 0.0, 1.05) * textureMask;
 
       float minCh = min(result.r, min(result.g, result.b));
       float maxCh = max(result.r, max(result.g, result.b));
-      float shadowGuard = smoothstep(0.03, 0.16, lc);
-      float highlightGuard = smoothstep(0.98, 0.86, lc);
-      float rawDelta = (casDelta + lineDelta) * shadowGuard * highlightGuard;
-
-      float maxNeg = -min(0.12, minCh * 0.42);
-      float maxPos =  min(0.12, (1.0 - maxCh) * 0.42);
-      float safeDelta = clamp(rawDelta, maxNeg, maxPos);
+      float shadowGuard = smoothstep(0.015, 0.11, lc);
+      float highlightGuard = smoothstep(0.99, 0.89, lc);
+      float rawDelta = (casDelta + lineDelta + microDelta) * shadowGuard * highlightGuard;
+      float safeDelta = softKneeDelta(rawDelta, minCh, maxCh, 0.28);
 
       return clamp(result + vec3(safeDelta), 0.0, 1.0);
     }
 
-    float computeCoherentLumaDelta5(sampler2D tex, highp vec2 uv, vec3 c) {
+    float computeCoherentLumaDelta9(sampler2D tex, highp vec2 uv, vec3 c) {
       highp vec2 dx = vec2(uSrcTexelSize.x, 0.0);
       highp vec2 dy = vec2(0.0, uSrcTexelSize.y);
-      float lc = luma(c);
-      float ln = luma(tapTex(tex, uv - dy));
-      float ls = luma(tapTex(tex, uv + dy));
-      float lw = luma(tapTex(tex, uv - dx));
-      float le = luma(tapTex(tex, uv + dx));
+      float lc  = luma(c);
+      float ln  = luma(tapTex(tex, uv - dy));
+      float ls  = luma(tapTex(tex, uv + dy));
+      float lw  = luma(tapTex(tex, uv - dx));
+      float le  = luma(tapTex(tex, uv + dx));
+      float lnw = luma(tapTex(tex, uv - dx - dy));
+      float lne = luma(tapTex(tex, uv + dx - dy));
+      float lsw = luma(tapTex(tex, uv - dx + dy));
+      float lse = luma(tapTex(tex, uv + dx + dy));
 
-      float lMin = min(lc, min(min(ln, ls), min(lw, le)));
-      float lMax = max(lc, max(max(ln, ls), max(lw, le)));
+      float lMin = min(lc, min(min(min(ln, ls), min(lw, le)), min(min(lnw, lne), min(lsw, lse))));
+      float lMax = max(lc, max(max(max(ln, ls), max(lw, le)), max(max(lnw, lne), max(lsw, lse))));
       float contrastRange = lMax - lMin;
 
-      float highFreq = lc - (ln + ls + lw + le) * 0.25;
-      float casRatio = clamp(min(lMin, 1.0 - lMax) / max(lMax, 0.14), 0.0, 1.0);
-      float sharpStrength = clamp(uSharpen * 0.98 + uUpscaleStrength * 0.56, 0.0, 1.35);
-      float casDelta = highFreq * sharpStrength * (0.50 + 0.50 * casRatio);
+      float highFreq = lc - ((ln + ls + lw + le) * 0.15 + (lnw + lne + lsw + lse) * 0.10);
+      float casRatio = clamp(min(lMin, 1.0 - lMax) / max(lMax, 0.12), 0.0, 1.0);
+      float sharpStrength = clamp(uSharpen * 1.80 + uUpscaleStrength * 1.15, 0.0, 2.60);
+      float casDelta = highFreq * sharpStrength * (0.58 + 0.42 * casRatio);
 
-      float gradMag = (abs(le - lw) + abs(ls - ln)) * 0.5;
-      float lineMask = smoothstep(0.07, 0.22, gradMag) * smoothstep(0.14, 0.34, contrastRange);
+      float gx = (lne + 2.0 * le + lse) - (lnw + 2.0 * lw + lsw);
+      float gy = (lsw + 2.0 * ls + lse) - (lnw + 2.0 * ln + lne);
+      float sobelMag = (abs(gx) + abs(gy)) * 0.18;
+      float lineMask = smoothstep(0.045, 0.20, sobelMag) * smoothstep(0.08, 0.26, contrastRange);
       float midLuma = 0.5 * (lMin + lMax);
-      float lineStrength = clamp(uUpscaleStrength * 0.30 + uEdgeEnhance * 0.25, 0.0, 0.44) * lineMask;
-      float lineTarget = (lc < midLuma) ? (lMin - lc) * 0.40 : (lMax - lc) * 0.24;
+      float lineStrength = clamp(uUpscaleStrength * 0.52 + uEdgeEnhance * 0.46, 0.0, 0.84) * lineMask;
+      float lineTarget = (lc < midLuma) ? (lMin - lc) * 0.66 : (lMax - lc) * 0.44;
       float lineDelta = lineTarget * lineStrength;
 
-      return (casDelta + lineDelta) * smoothstep(0.03, 0.16, lc) * smoothstep(0.98, 0.86, lc);
+      return (casDelta + lineDelta) * smoothstep(0.015, 0.11, lc) * smoothstep(0.99, 0.89, lc);
     }
 
     void main() {
@@ -698,7 +759,7 @@
           fragColor = vec4(rawCurr, 1.0);
           return;
         }
-        fragColor = vec4(enhanceFrame5Tap(uTexCurr, vUv, rawCurr, true), 1.0);
+        fragColor = vec4(enhanceFrame9Tap(uTexCurr, vUv, rawCurr, true), 1.0);
         return;
       }
 
@@ -713,19 +774,17 @@
       }
 
       vec3 cSample = tapTex(uTexCurr, uvCurr);
-      float deltaCurr = computeCoherentLumaDelta5(uTexCurr, uvCurr, cSample);
+      float deltaCurr = computeCoherentLumaDelta9(uTexCurr, uvCurr, cSample);
       float rawDelta = deltaCurr;
       if (effAlpha < 0.99) {
         vec3 pSample = tapTex(uTexPrev, uvPrev);
-        float deltaPrev = computeCoherentLumaDelta5(uTexPrev, uvPrev, pSample);
+        float deltaPrev = computeCoherentLumaDelta9(uTexPrev, uvPrev, pSample);
         rawDelta = mix(deltaPrev, deltaCurr, effAlpha);
       }
 
       float minCh = min(c.r, min(c.g, c.b));
       float maxCh = max(c.r, max(c.g, c.b));
-      float maxNeg = -min(0.11, minCh * 0.42);
-      float maxPos =  min(0.11, (1.0 - maxCh) * 0.42);
-      float safeDelta = clamp(rawDelta, maxNeg, maxPos);
+      float safeDelta = softKneeDelta(rawDelta, minCh, maxCh, 0.26);
 
       fragColor = vec4(clamp(c + vec3(safeDelta), 0.0, 1.0), 1.0);
     }
@@ -769,11 +828,14 @@
       float lc = luma(c);
       float blurL = (luma(n) + luma(s) + luma(w) + luma(e)) * 0.25;
       float highFreq = lc - blurL;
-      float gain = clamp(uSharpen * 0.95 + uUpscaleStrength * 0.55 + uEdgeEnhance * 0.30, 0.0, 1.35);
+      float gain = clamp(uSharpen * 1.85 + uUpscaleStrength * 1.15 + uEdgeEnhance * 0.65, 0.0, 2.65);
       float minCh = min(c.r, min(c.g, c.b));
       float maxCh = max(c.r, max(c.g, c.b));
-      float guard = smoothstep(0.03, 0.16, lc) * smoothstep(0.98, 0.86, lc);
-      float safeDelta = clamp(highFreq * gain * guard, -min(0.11, minCh * 0.40), min(0.11, (1.0 - maxCh) * 0.40));
+      float guard = smoothstep(0.015, 0.11, lc) * smoothstep(0.99, 0.89, lc);
+      float rawD = highFreq * gain * guard;
+      float lim = (rawD < 0.0) ? min(0.26, minCh * 0.70) : min(0.26, (1.0 - maxCh) * 0.70);
+      float mag = abs(rawD);
+      float safeDelta = sign(rawD) * (mag * lim) / (mag + lim + 0.0001);
       gl_FragColor = vec4(clamp(c + vec3(safeDelta), 0.0, 1.0), 1.0);
     }
   `;
@@ -829,8 +891,8 @@
     }
     const conv = document.getElementById("zenithfox-svg-4k-kernel");
     if (conv) {
-      // Sum of weights == 1.0 -> exact brightness/color preservation, crisp edges, zero black crush!
-      const k = Math.max(0.14, Math.min(0.42, 0.14 + strength * 0.26));
+      // Sum of weights == 1.0 -> exact brightness/color preservation, unmistakably crisp 4K edges, zero black crush!
+      const k = Math.max(0.32, Math.min(0.88, 0.28 + strength * 0.56));
       const center = (1.0 + 4.0 * k).toFixed(3);
       const neg = (-k).toFixed(3);
       conv.setAttribute("kernelMatrix", `0 ${neg} 0 ${neg} ${center} ${neg} 0 ${neg} 0`);
@@ -924,7 +986,7 @@
       this.outputFps = 0;
       this.lowFpsStreak = 0;
       this.interpAutoDisabled = false;
-      this.dynamicMaxDim = 1920;
+      this.dynamicMaxDim = 2880;
 
       this.config = {
         enabled: false,
@@ -1160,6 +1222,7 @@
         if (wantPipeline && !document.hidden && !this.webglBrokenForVideo) {
           this.active = false;
           this.start();
+          sendTelemetry(true);
         }
       } catch (_) {
         this.webGpuFailed = true;
@@ -1181,6 +1244,7 @@
           this.active = false;
           this.start();
         }
+        sendTelemetry(true);
       }
     }
 
@@ -1356,7 +1420,7 @@
       const safeCanvasZ = isNaN(vidZ) ? 1 : Math.max(1, vidZ + 1);
       this.canvas.style.zIndex = String(safeCanvasZ);
 
-      const dpr = Math.min(2.5, window.devicePixelRatio || 2);
+      const dpr = Math.min(3.0, window.devicePixelRatio || 2);
       if (video.offsetWidth > 10 && video.offsetHeight > 10) {
         this.canvas.style.left = `${video.offsetLeft}px`;
         this.canvas.style.top = `${video.offsetTop}px`;
@@ -1503,7 +1567,7 @@
         this.hasPrevFrame = false;
         this.gpuHasPrev = false;
         this.lowFpsStreak = 0;
-        this.dynamicMaxDim = 1920;
+        this.dynamicMaxDim = 2880;
         if (!this.corsBlocked && this.webglBrokenForVideo && (this.backend === "WEBGPU" || this.backend === "WEBGL2")) {
           this.webglBrokenForVideo = false;
         }
@@ -1689,27 +1753,29 @@
 
       let tierMaxLong;
       if (this.backend === "WEBGPU") {
-        // WebGPU Zero-Copy has ZERO texture upload cost -> crisp higher caps at ~1ms GPU time!
-        if (scale <= 1.05) tierMaxLong = 1600;
-        else if (scale <= 1.30) tierMaxLong = 1920;
+        // WebGPU Zero-Copy has ZERO texture upload cost -> true crisp supersampling up to 2880px!
+        if (scale <= 1.05) tierMaxLong = 1920;
+        else if (scale <= 1.30) tierMaxLong = 2240;
+        else if (scale <= 1.65) tierMaxLong = 2560;
+        else tierMaxLong = 2880;
+      } else {
+        // WebGL2 Zero-Stall: NEVER downscale 1080p to 720p! Match native 1080p -> 2.5K crispness;
+        // anti-5-FPS watchdog still steps dynamicMaxDim down automatically on weak GPUs.
+        if (scale <= 1.05) tierMaxLong = 1920;
+        else if (scale <= 1.30) tierMaxLong = 2048;
         else if (scale <= 1.65) tierMaxLong = 2240;
         else tierMaxLong = 2560;
-      } else {
-        // WebGL2 fallback: keep fill-rate ultra-lightweight so kCopySubTextureCHROMIUM never stalls!
-        if (scale <= 1.05) tierMaxLong = 1280;
-        else if (scale <= 1.30) tierMaxLong = 1440;
-        else if (scale <= 1.65) tierMaxLong = 1600;
-        else tierMaxLong = 1920;
       }
 
-      const screenLongEdge = Math.max(this.cachedDispW, this.cachedDispH, 1280);
-      const fgCap = this.backend === "WEBGPU" ? 1600 : 1280;
+      const nativeLong = Math.max(vw, vh, 1280);
+      const screenLongEdge = Math.max(this.cachedDispW, this.cachedDispH, nativeLong);
+      const fgCap = this.backend === "WEBGPU" ? 1600 : 1440;
       const hardCap = interpActive
         ? Math.min(this.dynamicMaxDim, tierMaxLong, fgCap, screenLongEdge)
-        : Math.min(this.dynamicMaxDim, tierMaxLong, screenLongEdge);
+        : Math.min(this.dynamicMaxDim, tierMaxLong, Math.max(screenLongEdge, 2240));
 
-      let targetW = Math.round(vw * Math.min(scale, this.backend === "WEBGPU" ? 1.75 : 1.5));
-      let targetH = Math.round(vh * Math.min(scale, this.backend === "WEBGPU" ? 1.75 : 1.5));
+      let targetW = Math.round(vw * Math.min(scale, this.backend === "WEBGPU" ? 2.0 : 1.75));
+      let targetH = Math.round(vh * Math.min(scale, this.backend === "WEBGPU" ? 2.0 : 1.75));
       const curLong = Math.max(targetW, targetH);
       if (curLong > hardCap) {
         const k = hardCap / curLong;
@@ -2168,11 +2234,19 @@
       this.stop();
       this._clearSvgGpuFallback();
       this._destroyWebGPU();
-      if (this.gl && this.texRing.length > 0) {
-        for (const t of this.texRing) {
-          try { this.gl.deleteTexture(t); } catch (_) {}
+      if (this.gl) {
+        if (this.texRing.length > 0) {
+          for (const t of this.texRing) {
+            try { this.gl.deleteTexture(t); } catch (_) {}
+          }
+          this.texRing = [];
         }
-        this.texRing = [];
+        // Explicitly release WebGL GPU context so Android immediately drops GPU clocks & returns video to HWC overlay!
+        try {
+          const loseCtx = this.gl.getExtension("WEBGL_lose_context");
+          if (loseCtx) loseCtx.loseContext();
+        } catch (_) {}
+        this.gl = null;
       }
       if (this.resizeObserver) {
         try { this.resizeObserver.disconnect(); } catch (_) {}
@@ -2319,11 +2393,17 @@
     rvfcHandle = null;
   }
 
+  let detailedTelemetry = false;
+  let lastTelemetrySignature = "";
+  let styleObserverTimer = null;
+
   function startSourceRvfcTracker(video) {
     stopSourceRvfcTracker();
     rvfcPresentedFrames = 0;
-    // Skip duplicate rVFC callback if pipeline is already driving rVFC or getVideoPlaybackQuality is available!
-    if (!video || typeof video.requestVideoFrameCallback !== "function" || document.hidden) return;
+    // ZERO-BATTERY RULE: Never wake V8 24-60x/sec with rVFC when Chromium's zero-cost getVideoPlaybackQuality() works!
+    if (!video || document.hidden) return;
+    if (typeof video.getVideoPlaybackQuality === "function") return;
+    if (typeof video.requestVideoFrameCallback !== "function") return;
     if (pipeline && pipeline.active) return;
     const tick = (_now, meta) => {
       if (video !== activeVideo || !video.isConnected || document.hidden || (pipeline && pipeline.active)) {
@@ -2347,6 +2427,29 @@
     return scalingStyleTag;
   }
 
+  function syncVideoStyleObserver() {
+    if (videoStyleObserver) {
+      videoStyleObserver.disconnect();
+      videoStyleObserver = null;
+    }
+    if (styleObserverTimer !== null) {
+      clearTimeout(styleObserverTimer);
+      styleObserverTimer = null;
+    }
+    // Only observe <video> style changes when custom scaling or force-fullscreen is active!
+    // In default FIT mode, let the site's native <video> play untouched on Android's HWC hardware plane!
+    const needCustomScaling = (currentScalingMode && currentScalingMode !== "FIT") || isForceFullscreen;
+    if (!activeVideo || !needCustomScaling) return;
+    videoStyleObserver = new MutationObserver(() => {
+      if (isApplyingScaling || styleObserverTimer !== null) return;
+      styleObserverTimer = setTimeout(() => {
+        styleObserverTimer = null;
+        if (!isApplyingScaling) applyScaling();
+      }, 250);
+    });
+    videoStyleObserver.observe(activeVideo, { attributes: true, attributeFilter: ["style", "class"] });
+  }
+
   function applyScaling() {
     if (!activeVideo || !activeVideo.isConnected || isApplyingScaling) return;
     isApplyingScaling = true;
@@ -2355,6 +2458,23 @@
       const mode = currentScalingMode || "FIT";
       const zoom = Math.max(0.5, Math.min(3.0, currentCustomZoom || 1.0));
       v.setAttribute("data-ab-active", "true");
+
+      // ZERO-OVERHEAD NATIVE HWC FAST PATH:
+      // When scaling is default FIT and not in Force Fullscreen, avoid injecting CSS overrides or forcing layout reflows!
+      if (mode === "FIT" && !isForceFullscreen) {
+        if (scalingStyleTag) {
+          scalingStyleTag.remove();
+          scalingStyleTag = null;
+        }
+        v.style.removeProperty("object-fit");
+        v.style.removeProperty("transform");
+        v.style.removeProperty("transform-origin");
+        if (pipeline) {
+          pipeline.applyScalingStyles("contain", "none");
+        }
+        syncVideoStyleObserver();
+        return;
+      }
 
       const rect = v.getBoundingClientRect();
       const cw = rect.width || window.innerWidth || 1;
@@ -2402,6 +2522,7 @@
       if (pipeline) {
         pipeline.applyScalingStyles(objectFit, transformCss);
       }
+      syncVideoStyleObserver();
     } finally {
       isApplyingScaling = false;
     }
@@ -2463,9 +2584,53 @@
     applyScaling();
   }
 
+  // 100% LAZY GPU PIPELINE:
+  // Creates WebGPU/WebGL2 + overlay <canvas> ONLY when Upscaling or Frame Gen is turned ON,
+  // and COMPLETELY DESTROYS them when turned OFF so Android keeps <video> on its zero-heat HWC hardware plane!
+  function ensureOrTeardownPipeline() {
+    const wantPipeline = !!(currentEnhancementConfig.enabled || currentEnhancementConfig.frameGenEnabled);
+    if (!wantPipeline || !activeVideo) {
+      if (pipeline) {
+        pipeline.destroy();
+        pipeline = null;
+      }
+      return;
+    }
+    if (!pipeline) {
+      pipeline = new ChromiumWebGL4KPipeline(activeVideo);
+    }
+    pipeline.syncGeometry();
+    pipeline.updateConfig(currentEnhancementConfig);
+  }
+
+  const onActiveVideoStateEvent = () => {
+    sendTelemetry(true);
+  };
+
+  function attachVideoLifecycleEvents(video) {
+    if (!video) return;
+    video.addEventListener("play", onActiveVideoStateEvent);
+    video.addEventListener("pause", onActiveVideoStateEvent);
+    video.addEventListener("ended", onActiveVideoStateEvent);
+    video.addEventListener("loadedmetadata", onActiveVideoStateEvent);
+    video.addEventListener("ratechange", onActiveVideoStateEvent);
+    video.addEventListener("volumechange", onActiveVideoStateEvent);
+  }
+
+  function detachVideoLifecycleEvents(video) {
+    if (!video) return;
+    video.removeEventListener("play", onActiveVideoStateEvent);
+    video.removeEventListener("pause", onActiveVideoStateEvent);
+    video.removeEventListener("ended", onActiveVideoStateEvent);
+    video.removeEventListener("loadedmetadata", onActiveVideoStateEvent);
+    video.removeEventListener("ratechange", onActiveVideoStateEvent);
+    video.removeEventListener("volumechange", onActiveVideoStateEvent);
+  }
+
   function bindVideo(video) {
     if (activeVideo === video) return;
     stopSourceRvfcTracker();
+    detachVideoLifecycleEvents(activeVideo);
     if (videoStyleObserver) {
       videoStyleObserver.disconnect();
       videoStyleObserver = null;
@@ -2479,19 +2644,15 @@
     }
 
     activeVideo = video;
+    lastTelemetrySignature = "";
     resetFpsBaseline();
     if (!video) return;
 
     video.setAttribute("data-ab-active", "true");
-    pipeline = new ChromiumWebGL4KPipeline(video);
-    pipeline.updateConfig(currentEnhancementConfig);
+    attachVideoLifecycleEvents(video);
+    ensureOrTeardownPipeline();
     startSourceRvfcTracker(video);
     applyScaling();
-
-    videoStyleObserver = new MutationObserver(() => {
-      if (!isApplyingScaling) applyScaling();
-    });
-    videoStyleObserver.observe(video, { attributes: true, attributeFilter: ["style", "class"] });
   }
 
   function handleVideoControl(action, payload) {
@@ -2586,10 +2747,10 @@
     };
   }
 
-  function sendTelemetry() {
+  function sendTelemetry(force) {
     if (document.hidden) return;
 
-    // ZERO DOM SCANNING DURING ACTIVE PLAYBACK: prevents periodic 1.2s layout reflows & FPS jitter!
+    // ZERO DOM SCANNING DURING ACTIVE PLAYBACK: prevents periodic layout reflows & CPU wakeups!
     const hasHealthyPlayingVideo = !!(
       activeVideo &&
       activeVideo.isConnected &&
@@ -2604,24 +2765,28 @@
     }
 
     if (!activeVideo) {
-      if (window === window.top) {
+      if (window === window.top && (force || lastTelemetrySignature !== "NO_VIDEO")) {
+        lastTelemetrySignature = "NO_VIDEO";
         postToNative({ type: "VIDEO_TELEMETRY", data: { hasVideo: false, url: location.href } });
       }
       return;
     }
 
-    sampleRealTimeSourceFps();
     const v = activeVideo;
     const isPlaying = !v.paused && !v.ended && v.readyState >= 2;
+    const pipelineActive = !!(pipeline && pipeline.active);
+    if (detailedTelemetry || pipelineActive || measuredSourceFps === 0) {
+      sampleRealTimeSourceFps();
+    }
+
     const hasSubtitles = v.textTracks && v.textTracks.length > 0;
     const subtitlesVisible = hasSubtitles && Array.from(v.textTracks).some(t => t.mode === "showing");
-    const bufferedPct = (v.duration > 0 && v.buffered.length > 0)
+    const bufferedPct = detailedTelemetry && v.duration > 0 && v.buffered.length > 0
       ? Math.round((v.buffered.end(v.buffered.length - 1) / v.duration) * 100)
       : 0;
 
     const frameGenActive = !!(
-      pipeline &&
-      pipeline.active &&
+      pipelineActive &&
       pipeline.frameVerified &&
       (pipeline.backend === "WEBGPU" || pipeline.backend === "WEBGL2") &&
       currentEnhancementConfig.frameGenEnabled &&
@@ -2630,8 +2795,18 @@
 
     const liveSourceFps = isPlaying ? measuredSourceFps : 0;
     const liveOutputFps = isPlaying
-      ? (pipeline && pipeline.active && pipeline.frameVerified && pipeline.outputFps > 0 ? pipeline.outputFps : liveSourceFps)
+      ? (pipelineActive && pipeline.frameVerified && pipeline.outputFps > 0 ? pipeline.outputFps : liveSourceFps)
       : 0;
+    const statusStr = pipeline ? pipeline.status : "IDLE";
+    const gpuStr = pipeline ? pipeline.gpuRenderer : "Android HWC Hardware Decode";
+    const webGpuFlag = pipeline ? pipeline.webGpuSupported : (typeof navigator !== "undefined" && !!navigator.gpu);
+    const reportedTime = detailedTelemetry && isFinite(v.currentTime) ? Math.floor(v.currentTime) : 0;
+    const reportedDur = isFinite(v.duration) ? Math.floor(v.duration) : 0;
+
+    // Deduplicate telemetry messages so idle playback triggers ZERO unnecessary Android IPC & ZERO Compose recompositions!
+    const sig = `${v.videoWidth}x${v.videoHeight}|${isPlaying ? 1 : 0}|${v.muted ? 1 : 0}|${v.playbackRate}|${liveSourceFps}|${liveOutputFps}|${statusStr}|${currentScalingMode}|${currentCustomZoom}|${isForceFullscreen ? 1 : 0}|${frameGenActive ? 1 : 0}|${subtitlesVisible ? 1 : 0}|${detailedTelemetry ? reportedTime : 0}`;
+    if (!force && sig === lastTelemetrySignature) return;
+    lastTelemetrySignature = sig;
 
     postToNative({
       type: "VIDEO_TELEMETRY",
@@ -2641,15 +2816,15 @@
         videoWidth: v.videoWidth || 0,
         videoHeight: v.videoHeight || 0,
         isPlaying: isPlaying,
-        currentTime: isFinite(v.currentTime) ? v.currentTime : 0,
-        duration: isFinite(v.duration) ? v.duration : 0,
+        currentTime: reportedTime,
+        duration: reportedDur,
         playbackRate: v.playbackRate || 1.0,
         muted: !!v.muted,
         sourceFps: liveSourceFps,
         outputFps: liveOutputFps,
-        enhancementStatus: pipeline ? pipeline.status : "IDLE",
-        gpuRenderer: pipeline ? pipeline.gpuRenderer : "Chromium GPU",
-        webGpuSupported: pipeline ? pipeline.webGpuSupported : false,
+        enhancementStatus: statusStr,
+        gpuRenderer: gpuStr,
+        webGpuSupported: webGpuFlag,
         isDrmProtected: false,
         hasSubtitles: !!hasSubtitles,
         subtitlesVisible: !!subtitlesVisible,
@@ -2668,13 +2843,23 @@
     switch (msg.type) {
       case "SET_ENHANCEMENT":
         currentEnhancementConfig = Object.assign({}, currentEnhancementConfig, msg.payload || {});
-        if (pipeline) {
-          pipeline.syncGeometry();
-          pipeline.updateConfig(currentEnhancementConfig);
-          if (pipeline.active) stopSourceRvfcTracker();
-          else if (activeVideo) startSourceRvfcTracker(activeVideo);
+        if (!activeVideo || !activeVideo.isConnected) {
+          const cand = pickPrimaryVideo();
+          if (cand) bindVideo(cand);
         }
-        sendTelemetry();
+        ensureOrTeardownPipeline();
+        if (pipeline && pipeline.active) {
+          stopSourceRvfcTracker();
+          applyScaling();
+        } else if (activeVideo) {
+          startSourceRvfcTracker(activeVideo);
+          applyScaling();
+        }
+        sendTelemetry(true);
+        break;
+      case "SET_TELEMETRY_MODE":
+        detailedTelemetry = !!(msg.payload && msg.payload.detailed);
+        if (detailedTelemetry) sendTelemetry(true);
         break;
       case "SET_SPLIT_POS": {
         const pos = Math.max(0.02, Math.min(0.98, Number((msg.payload && msg.payload.splitPosition) ?? 0.5)));
@@ -2815,10 +3000,17 @@
     bootstrapDomObservers();
   }
 
-  // Low-power 1.5s heartbeat (completely paused when document.hidden; zero DOM scans during active playback!)
+  // Ultra-low-power adaptive heartbeat:
+  // - Completely paused when document.hidden
+  // - Only ticks every 4.5s during normal native HWC playback (deduplicated -> ZERO IPC & ZERO Compose recompositions!)
+  // - Ticks every 1.5s ONLY when user opens Video Tools/Enhancer HUD or actively runs 4K GPU pipeline
+  let heartbeatTick = 0;
   setInterval(() => {
     if (document.hidden) return;
-    sendTelemetry();
+    heartbeatTick++;
+    const activeMode = detailedTelemetry || !!(pipeline && pipeline.active);
+    if (!activeMode && (heartbeatTick % 3 !== 0)) return;
+    sendTelemetry(false);
     if (!activeVideo || activeVideo.paused) {
       scanDomVideoStreams();
     }

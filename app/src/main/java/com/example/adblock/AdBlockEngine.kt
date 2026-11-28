@@ -54,8 +54,16 @@ class AdBlockEngine(
     RegexOption.IGNORE_CASE
   )
 
+  @Volatile
+  private var cachedCustomDomains: Set<String> = emptySet()
+
   val customRules: StateFlow<List<CustomBlockRuleEntity>> =
-    customBlockRuleDao.observeAll().stateIn(scope, SharingStarted.Eagerly, emptyList())
+    customBlockRuleDao.observeAll()
+      .map { list ->
+        cachedCustomDomains = list.map { it.domain.lowercase() }.toSet()
+        list
+      }
+      .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
   val whitelistedHosts: StateFlow<Set<String>> =
     siteSettingDao.observeWhitelistedHosts()
@@ -259,7 +267,8 @@ class AdBlockEngine(
   }
 
   private fun matchesCustomRules(host: String): Boolean {
-    val customSet = customRules.value.map { it.domain.lowercase() }.toSet()
+    val customSet = cachedCustomDomains
+    if (customSet.isEmpty()) return false
     return matchesSet(host, customSet)
   }
 

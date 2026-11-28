@@ -182,14 +182,40 @@ class MainActivity : ComponentActivity() {
   }
 
   /**
-   * Prefers 60 Hz display refresh rate by default to save OLED & GPU power;
-   * automatically unlocks 90/120 Hz only when the user actively enables >60 FPS Frame Generation.
+   * Locks display hardware to true 60 Hz via BOTH preferredDisplayModeId AND preferredRefreshRate
+   * by default (prevents 120 Hz AMOLED panels like POCO X6 Pro / HyperOS from staying stuck at 120 Hz
+   * during normal video playback, cutting display & compositor power/heat dramatically).
+   * Automatically unlocks 90/120 Hz only when the user actively enables >60 FPS Frame Generation.
    */
   private fun applyPreferredRefreshRate(targetHz: Float) {
     runCatching {
       val attrs = window.attributes
+      var changed = false
       if (attrs.preferredRefreshRate != targetHz) {
         attrs.preferredRefreshRate = targetHz
+        changed = true
+      }
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        val currentDisplay = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+          display
+        } else {
+          @Suppress("DEPRECATION")
+          windowManager.defaultDisplay
+        }
+        val currentMode = currentDisplay?.mode
+        val supportedModes = currentDisplay?.supportedModes
+        if (currentMode != null && !supportedModes.isNullOrEmpty()) {
+          val matchingResModes = supportedModes.filter {
+            it.physicalWidth == currentMode.physicalWidth && it.physicalHeight == currentMode.physicalHeight
+          }
+          val bestMode = matchingResModes.minByOrNull { kotlin.math.abs(it.refreshRate - targetHz) }
+          if (bestMode != null && attrs.preferredDisplayModeId != bestMode.modeId) {
+            attrs.preferredDisplayModeId = bestMode.modeId
+            changed = true
+          }
+        }
+      }
+      if (changed) {
         window.attributes = attrs
       }
     }
@@ -388,7 +414,7 @@ private fun AnimeBrowserRoot(
     onKeepScreenAwake(videoTelemetry.isPlaying && settings.keepScreenAwakeVideo)
   }
 
-  // Keep display at power-efficient 60 Hz by default; only request >60 Hz when Frame Gen target > 60 FPS
+  // Keep display at true hardware 60 Hz by default; only request >60 Hz when Frame Gen target > 60 FPS
   LaunchedEffect(enhancementConfig.frameGenEnabled, enhancementConfig.targetFps, videoTelemetry.isPlaying) {
     val desiredHz = if (enhancementConfig.frameGenEnabled && videoTelemetry.isPlaying && enhancementConfig.targetFps > 60) {
       enhancementConfig.targetFps.toFloat()
@@ -396,6 +422,20 @@ private fun AnimeBrowserRoot(
       60f
     }
     onUpdatePreferredRefreshRate(desiredHz)
+  }
+
+  // Only poll Android system RAM/thermal stats when HUD, Settings, or Tab Switcher is actually open!
+  val needPerfStats = settings.showPerformanceOverlay ||
+    currentRoute == BrowserScreenRoute.SETTINGS ||
+    currentRoute == BrowserScreenRoute.TABS
+  LaunchedEffect(needPerfStats) {
+    viewModel.setPerfStatsVisible(needPerfStats)
+  }
+
+  // Only stream per-second video time/buffer telemetry when the Enhancer Sheet, Video Tools, or HUD is open!
+  val needDetailedTelemetry = showEnhancerSheet || showVideoControlPanel || settings.showPerformanceOverlay
+  LaunchedEffect(needDetailedTelemetry) {
+    viewModel.setDetailedTelemetryActive(needDetailedTelemetry)
   }
 
   LaunchedEffect(
